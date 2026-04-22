@@ -1,0 +1,710 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=0.8in]{geometry}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{titlesec}
+\usepackage{hyperref}
+\usepackage{fancyhdr}
+
+\definecolor{codebg}{RGB}{245,245,245}
+\definecolor{codegreen}{RGB}{0,128,0}
+\definecolor{codegray}{RGB}{128,128,128}
+\definecolor{codeblue}{RGB}{0,0,180}
+\definecolor{codepurple}{RGB}{128,0,128}
+
+\lstset{
+    language=C++,
+    backgroundcolor=\color{codebg},
+    basicstyle=\ttfamily\footnotesize,
+    keywordstyle=\color{codeblue}\bfseries,
+    commentstyle=\color{codegreen}\itshape,
+    stringstyle=\color{codepurple},
+    numberstyle=\tiny\color{codegray},
+    numbers=left,
+    numbersep=5pt,
+    frame=single,
+    breaklines=true,
+    breakatwhitespace=false,
+    tabsize=4,
+    showstringspaces=false,
+    captionpos=b,
+    morekeywords={override,nullptr,string,shared_ptr,unique_ptr,make_shared,make_unique,
+                  lock_guard,unique_lock,mutex,thread,vector,unordered_map,map,
+                  chrono,steady_clock,time_point,atomic},
+}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\textbf{LLD --- Ride Service}}
+\fancyhead[R]{\thepage}
+
+\title{\Huge\textbf{Ride Service}\\[0.3em]\Large Low-Level Design --- C++ Concurrency}
+\author{LLD Interview Preparation}
+\date{}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+% ============================================================
+\section{File Structure}
+% ============================================================
+\begin{verbatim}
+ride-service/
+  models.hpp       -- Location, Rider, Driver (with driverMtx), TripMetaData, Trip
+  strategies.hpp   -- PricingStrategy, MatchingStrategy
+  managers.hpp     -- RiderMgr, DriverMgr, TripManager (Singletons)
+  main.cpp         -- Demo: sequential + concurrent trip booking
+\end{verbatim}
+
+\textbf{Compilation:}
+\begin{verbatim}
+g++ -std=c++17 -pthread -o ride_service.exe main.cpp
+\end{verbatim}
+
+\subsection{Concurrency Summary}
+\begin{itemize}
+    \item \textbf{Level 1:} \texttt{operationMtx} (RiderMgr, DriverMgr, TripManager) --- collections
+    \item \textbf{Level 2:} \texttt{driverMtx} (per-Driver) --- availability check-and-set
+    \item \textbf{lock\_guard:} \texttt{addRider}, \texttt{addDriver}, trip ID gen, trip storage
+    \item No manager lock during strategy execution (pricing/matching)
+    \item \texttt{tryAssign()} is atomic check-and-set at driver level
+\end{itemize}
+
+\subsection{Design Patterns}
+\begin{itemize}
+    \item \textbf{Singleton:} RiderMgr, DriverMgr, TripManager
+    \item \textbf{Strategy:} PricingStrategy (Default, Surge, RatingBased), MatchingStrategy (LeastTime, HighRating)
+    \item \textbf{Factory:} \texttt{determinePricing()}, \texttt{determineMatching()} in TripManager
+\end{itemize}
+
+\subsection{Smart Pointers}
+\begin{itemize}
+    \item \texttt{unique\_ptr<Driver>} --- DriverMgr sole owner
+    \item \texttt{unique\_ptr<Rider>} --- RiderMgr sole owner
+    \item \texttt{shared\_ptr<Trip>} --- manager vector + caller
+    \item \texttt{unique\_ptr<Strategy>} --- created per-trip, sole ownership
+    \item \texttt{raw ptr (Driver*, Rider*)} --- non-owning refs in Trip
+\end{itemize}
+
+% ============================================================
+\newpage
+\section{models.hpp}
+% ============================================================
+\begin{lstlisting}[title={\texttt{models.hpp}}]
+#ifndef MODELS_HPP
+#define MODELS_HPP
+
+#include <string>
+#include <iostream>
+#include <cmath>
+#include <mutex>
+#include <memory>
+using namespace std;
+
+enum class TripStatus {
+    REQUESTED,
+    ASSIGNED,
+    IN_PROGRESS,
+    COMPLETED,
+    CANCELLED
+};
+
+class Location {
+    double latitude;
+    double longitude;
+    string name;
+
+public:
+    Location(double lat = 0, double lon = 0, const string& name = "")
+        : latitude(lat), longitude(lon), name(name) {}
+
+    double getLatitude() const { return latitude; }
+    double getLongitude() const { return longitude; }
+    string getName() const { return name; }
+
+    double distanceTo(const Location& other) const {
+        double dlat = other.latitude - latitude;
+        double dlon = other.longitude - longitude;
+        return sqrt(dlat * dlat + dlon * dlon);
+    }
+};
+
+class Rider {
+    string id;
+    string name;
+    int rating;
+
+public:
+    Rider() : rating(0) {}
+    Rider(const string& id, const string& name, int rating = 5)
+        : id(id), name(name), rating(rating) {}
+
+    string getId() const { return id; }
+    string getName() const { return name; }
+    int getRating() const { return rating; }
+};
+
+// Driver has mutable state (isAvailable) that needs thread-safe access.
+// The mutex lives here so each driver can be locked independently.
+class Driver {
+    string id;
+    string name;
+    int rating;
+    bool available;
+    mutable mutex driverMtx;
+
+public:
+    Driver(const string& id, const string& name, int rating = 5)
+        : id(id), name(name), rating(rating), available(true) {}
+
+    string getId() const { return id; }
+    string getName() const { return name; }
+    int getRating() const { return rating; }
+
+    // Thread-safe availability check + set
+    bool isAvailable() const {
+        lock_guard<mutex> lock(driverMtx);
+        return available;
+    }
+
+    // tryAssign: atomic check-and-set. Returns true if successfully claimed.
+    // This is PESSIMISTIC locking at the driver level:
+    // lock first, then check, then modify.
+    bool tryAssign() {
+        lock_guard<mutex> lock(driverMtx);
+        if (!available) return false;
+        available = false;
+        return true;
+    }
+
+    void release() {
+        lock_guard<mutex> lock(driverMtx);
+        available = true;
+    }
+};
+
+class TripMetaData {
+    Location source;
+    Location destination;
+    int riderRating;
+    double distance;
+
+public:
+    TripMetaData(const Location& src, const Location& dest, int rating)
+        : source(src), destination(dest), riderRating(rating) {
+        distance = source.distanceTo(dest);
+    }
+
+    const Location& getSource() const { return source; }
+    const Location& getDestination() const { return destination; }
+    int getRiderRating() const { return riderRating; }
+    double getDistance() const { return distance; }
+};
+
+// Trip: created by the service, stored as shared_ptr
+// (service owns it in the vector, but caller may also hold a ref)
+class Trip {
+    string tripId;
+    Rider* rider;       // non-owning: RiderMgr owns riders
+    Driver* driver;     // non-owning: DriverMgr owns drivers
+    unique_ptr<TripMetaData> metaData;  // sole ownership
+    double fare;
+    TripStatus status;
+
+public:
+    Trip(const string& id, Rider* r, unique_ptr<TripMetaData> meta)
+        : tripId(id), rider(r), metaData(move(meta)),
+          driver(nullptr), fare(0.0), status(TripStatus::REQUESTED) {}
+
+    ~Trip() {
+        if (driver) driver->release();
+    }
+
+    string getTripId() const { return tripId; }
+    Rider* getRider() const { return rider; }
+    Driver* getDriver() const { return driver; }
+    const TripMetaData* getMetaData() const { return metaData.get(); }
+    double getFare() const { return fare; }
+    TripStatus getStatus() const { return status; }
+
+    void setDriver(Driver* d) { driver = d; }
+    void setFare(double f) { fare = f; }
+    void setStatus(TripStatus s) { status = s; }
+
+    void display() const {
+        cout << "  Trip[" << tripId << "] "
+             << rider->getName() << " -> "
+             << (driver ? driver->getName() : "None")
+             << " | " << metaData->getSource().getName()
+             << " to " << metaData->getDestination().getName()
+             << " | " << metaData->getDistance() << " km"
+             << " | Fare: " << fare
+             << " | " << (status == TripStatus::ASSIGNED ? "Assigned" :
+                          status == TripStatus::COMPLETED ? "Completed" :
+                          status == TripStatus::CANCELLED ? "Cancelled" : "Requested")
+             << endl;
+    }
+};
+
+#endif
+\end{lstlisting}
+
+% ============================================================
+\newpage
+\section{strategies.hpp}
+% ============================================================
+\begin{lstlisting}[title={\texttt{strategies.hpp}}]
+#ifndef STRATEGIES_HPP
+#define STRATEGIES_HPP
+
+#include "models.hpp"
+#include <vector>
+#include <memory>
+using namespace std;
+
+// ============================================================
+// CONSTANTS
+// ============================================================
+namespace RideConstants {
+    constexpr double BASE_FARE = 50.0;
+    constexpr double PER_KM_RATE = 10.0;
+    constexpr double SURGE_MULTIPLIER = 2.0;
+    constexpr double RATING_DISCOUNT = 0.9;
+    constexpr int MIN_RATING_FOR_DISCOUNT = 4;
+}
+
+// ============================================================
+// PRICING STRATEGY (Strategy Pattern)
+// unique_ptr<PricingStrategy>: Trip is sole owner of its pricing.
+// Created by TripManager, transferred via move() to the caller.
+// ============================================================
+
+class PricingStrategy {
+public:
+    virtual ~PricingStrategy() = default;
+    virtual double calculateFare(const TripMetaData* meta) = 0;
+    virtual string getName() const = 0;
+};
+
+class DefaultPricing : public PricingStrategy {
+public:
+    double calculateFare(const TripMetaData* meta) override {
+        return RideConstants::BASE_FARE + (meta->getDistance() * RideConstants::PER_KM_RATE);
+    }
+    string getName() const override { return "Default"; }
+};
+
+class SurgePricing : public PricingStrategy {
+public:
+    double calculateFare(const TripMetaData* meta) override {
+        return (RideConstants::BASE_FARE + (meta->getDistance() * RideConstants::PER_KM_RATE))
+               * RideConstants::SURGE_MULTIPLIER;
+    }
+    string getName() const override { return "Surge"; }
+};
+
+class RatingBasedPricing : public PricingStrategy {
+public:
+    double calculateFare(const TripMetaData* meta) override {
+        double discount = (meta->getRiderRating() >= RideConstants::MIN_RATING_FOR_DISCOUNT)
+                          ? RideConstants::RATING_DISCOUNT : 1.0;
+        return (RideConstants::BASE_FARE + (meta->getDistance() * RideConstants::PER_KM_RATE)) * discount;
+    }
+    string getName() const override { return "RatingBased"; }
+};
+
+// ============================================================
+// MATCHING STRATEGY (Strategy Pattern)
+// These access the shared driver pool. Thread safety is handled
+// at the Driver level (driver->tryAssign() is atomic).
+// No global mutex needed here -- each driver locks itself.
+// ============================================================
+
+class MatchingStrategy {
+public:
+    virtual ~MatchingStrategy() = default;
+    virtual Driver* matchDriver(const vector<unique_ptr<Driver>>& drivers,
+                                const TripMetaData* meta) = 0;
+    virtual string getName() const = 0;
+};
+
+// Returns first available driver (fast, no preference)
+class LeastTimeMatching : public MatchingStrategy {
+public:
+    Driver* matchDriver(const vector<unique_ptr<Driver>>& drivers,
+                        const TripMetaData* meta) override {
+        for (auto& d : drivers) {
+            // tryAssign is atomic (lock_guard inside driver)
+            // PESSIMISTIC: lock driver, check availability, claim if free
+            if (d->tryAssign()) return d.get();
+        }
+        return nullptr;
+    }
+    string getName() const override { return "LeastTime"; }
+};
+
+// Returns highest-rated available driver
+class HighRatingMatching : public MatchingStrategy {
+public:
+    Driver* matchDriver(const vector<unique_ptr<Driver>>& drivers,
+                        const TripMetaData* meta) override {
+        Driver* best = nullptr;
+        int highestRating = 0;
+
+        for (auto& d : drivers) {
+            if (d->isAvailable() && d->getRating() > highestRating) {
+                highestRating = d->getRating();
+                best = d.get();
+            }
+        }
+        // Now try to claim the best driver atomically
+        if (best && best->tryAssign()) return best;
+        // If someone else grabbed it, fall back to any available
+        for (auto& d : drivers) {
+            if (d->tryAssign()) return d.get();
+        }
+        return nullptr;
+    }
+    string getName() const override { return "HighRating"; }
+};
+
+#endif
+\end{lstlisting}
+
+% ============================================================
+\newpage
+\section{managers.hpp}
+% ============================================================
+\begin{lstlisting}[title={\texttt{managers.hpp}}]
+#ifndef MANAGERS_HPP
+#define MANAGERS_HPP
+
+#include "strategies.hpp"
+#include <unordered_map>
+#include <vector>
+#include <mutex>
+#include <memory>
+#include <thread>
+using namespace std;
+
+// ============================================================
+// LOCKING STRATEGY: PESSIMISTIC (local locks, single server)
+// ----------------------------------------------------------
+// Level 1: Manager-level mutex (operationMtx)
+//   -> protects riders/drivers collections, trips vector
+// Level 2: Driver-level mutex (driverMtx inside Driver)
+//   -> protects individual driver availability
+//
+// WHY 2 LEVELS?
+//   When booking a trip, we only need the manager lock briefly
+//   to look up rider/drivers. Then we release it and use the
+//   per-driver lock for assignment. This way multiple trips
+//   can be processed in parallel as long as they target
+//   different drivers.
+//
+// LOCK CHOICES:
+//   lock_guard  -> addRider, addDriver, getRider (simple scope)
+//   unique_lock -> createTrip (release manager lock before
+//                  strategy execution, re-acquire to store trip)
+//
+// SMART POINTERS:
+//   unique_ptr<Driver>  -> DriverMgr is sole owner of drivers
+//   unique_ptr<Rider>   -> RiderMgr is sole owner of riders
+//   shared_ptr<Trip>    -> stored in vector AND returned to caller
+//   raw ptr (Driver*)   -> non-owning ref in Trip and strategies
+//   unique_ptr<Strategy>-> sole ownership, created per-trip
+// ============================================================
+
+class RiderMgr {
+    static mutex singletonMtx;
+    mutable mutex operationMtx;
+    unordered_map<string, unique_ptr<Rider>> riders;
+
+    RiderMgr() = default;
+
+public:
+    static RiderMgr* getInstance() {
+        lock_guard<mutex> lock(singletonMtx);
+        static RiderMgr instance;
+        return &instance;
+    }
+
+    void addRider(const string& id, unique_ptr<Rider> rider) {
+        lock_guard<mutex> lock(operationMtx);
+        riders[id] = move(rider);
+    }
+
+    // Returns non-owning raw ptr (caller does NOT own the rider)
+    Rider* getRider(const string& id) {
+        lock_guard<mutex> lock(operationMtx);
+        auto it = riders.find(id);
+        return (it != riders.end()) ? it->second.get() : nullptr;
+    }
+
+    RiderMgr(const RiderMgr&) = delete;
+    RiderMgr& operator=(const RiderMgr&) = delete;
+};
+
+class DriverMgr {
+    static mutex singletonMtx;
+    mutable mutex operationMtx;
+    // unique_ptr<Driver>: DriverMgr is sole owner. Strategies get
+    // raw (non-owning) pointers via getDrivers().
+    vector<unique_ptr<Driver>> drivers;
+
+    DriverMgr() = default;
+
+public:
+    static DriverMgr* getInstance() {
+        lock_guard<mutex> lock(singletonMtx);
+        static DriverMgr instance;
+        return &instance;
+    }
+
+    void addDriver(unique_ptr<Driver> driver) {
+        lock_guard<mutex> lock(operationMtx);
+        drivers.push_back(move(driver));
+    }
+
+    // Returns const ref to the vector. Caller must NOT modify.
+    // Individual driver thread-safety is handled by Driver's own mutex.
+    const vector<unique_ptr<Driver>>& getDrivers() {
+        lock_guard<mutex> lock(operationMtx);
+        return drivers;
+    }
+
+    DriverMgr(const DriverMgr&) = delete;
+    DriverMgr& operator=(const DriverMgr&) = delete;
+};
+
+class TripManager {
+    static mutex singletonMtx;
+    mutable mutex operationMtx;
+
+    // shared_ptr<Trip>: stored here AND returned to caller (shared ownership)
+    vector<shared_ptr<Trip>> trips;
+    int tripCounter = 0;
+
+    TripManager() = default;
+
+    // Strategy factory methods (no lock needed, pure logic)
+    unique_ptr<PricingStrategy> determinePricing(const TripMetaData* meta) {
+        if (meta->getDestination().getName().find("Airport") != string::npos)
+            return make_unique<SurgePricing>();
+        if (meta->getRiderRating() >= 4)
+            return make_unique<RatingBasedPricing>();
+        return make_unique<DefaultPricing>();
+    }
+
+    unique_ptr<MatchingStrategy> determineMatching(const TripMetaData* meta) {
+        if (meta->getRiderRating() >= 4)
+            return make_unique<HighRatingMatching>();
+        return make_unique<LeastTimeMatching>();
+    }
+
+public:
+    static TripManager* getInstance() {
+        lock_guard<mutex> lock(singletonMtx);
+        static TripManager instance;
+        return &instance;
+    }
+
+    // createTrip: the core concurrent operation
+    // unique_lock because we release the manager lock before
+    // calling strategies (which lock individual drivers).
+    shared_ptr<Trip> createTrip(const string& riderId,
+                                const Location& src, const Location& dest) {
+        // Step 1: Look up rider under manager lock
+        Rider* rider = RiderMgr::getInstance()->getRider(riderId);
+        if (!rider) {
+            cout << "[Thread " << this_thread::get_id() << "] "
+                 << "Rider not found: " << riderId << endl;
+            return nullptr;
+        }
+
+        // Step 2: Generate trip ID under lock
+        string tripId;
+        {
+            lock_guard<mutex> lock(operationMtx);
+            tripId = "TRIP_" + to_string(++tripCounter);
+        }
+
+        // Step 3: Create metadata and determine strategies (no lock needed)
+        auto meta = make_unique<TripMetaData>(src, dest, rider->getRating());
+        auto pricingStrategy = determinePricing(meta.get());
+        auto matchingStrategy = determineMatching(meta.get());
+
+        // Step 4: Calculate fare (pure computation, no lock)
+        double fare = pricingStrategy->calculateFare(meta.get());
+
+        // Step 5: Match driver (uses per-driver locks internally)
+        // No manager lock held -- other trips can proceed in parallel
+        auto& drivers = DriverMgr::getInstance()->getDrivers();
+        Driver* driver = matchingStrategy->matchDriver(drivers, meta.get());
+
+        // Step 6: Create trip and store under lock
+        auto trip = make_shared<Trip>(tripId, rider, move(meta));
+        trip->setFare(fare);
+
+        if (driver) {
+            trip->setDriver(driver);
+            trip->setStatus(TripStatus::ASSIGNED);
+            cout << "[Thread " << this_thread::get_id() << "] "
+                 << "Trip " << tripId << " created: "
+                 << rider->getName() << " -> " << driver->getName()
+                 << " | Fare: " << fare
+                 << " | Pricing: " << pricingStrategy->getName()
+                 << " | Matching: " << matchingStrategy->getName() << endl;
+        } else {
+            trip->setStatus(TripStatus::CANCELLED);
+            cout << "[Thread " << this_thread::get_id() << "] "
+                 << "Trip " << tripId << " cancelled: no driver for "
+                 << rider->getName() << endl;
+        }
+
+        {
+            lock_guard<mutex> lock(operationMtx);
+            trips.push_back(trip);
+        }
+        return trip;
+    }
+
+    void displayAllTrips() {
+        lock_guard<mutex> lock(operationMtx);
+        cout << "\n=== All Trips ===" << endl;
+        for (const auto& trip : trips) {
+            trip->display();
+        }
+    }
+
+    int getTripCount() {
+        lock_guard<mutex> lock(operationMtx);
+        return trips.size();
+    }
+
+    TripManager(const TripManager&) = delete;
+    TripManager& operator=(const TripManager&) = delete;
+};
+
+// Static member definitions
+mutex RiderMgr::singletonMtx;
+mutex DriverMgr::singletonMtx;
+mutex TripManager::singletonMtx;
+
+#endif
+\end{lstlisting}
+
+% ============================================================
+\newpage
+\section{main.cpp}
+% ============================================================
+\begin{lstlisting}[title={\texttt{main.cpp}}]
+#include <iostream>
+#include <thread>
+#include <vector>
+#include "managers.hpp"
+using namespace std;
+
+int main() {
+    cout << "=== Ride Booking Service ===" << endl << endl;
+
+    auto* riderMgr = RiderMgr::getInstance();
+    auto* driverMgr = DriverMgr::getInstance();
+    auto* tripMgr = TripManager::getInstance();
+
+    // Setup Riders
+    // unique_ptr<Rider>: RiderMgr is sole owner
+    riderMgr->addRider("R1", make_unique<Rider>("R1", "Alice", 5));
+    riderMgr->addRider("R2", make_unique<Rider>("R2", "Bob", 3));
+    riderMgr->addRider("R3", make_unique<Rider>("R3", "Charlie", 4));
+    riderMgr->addRider("R4", make_unique<Rider>("R4", "Diana", 5));
+
+    // Setup Drivers
+    // unique_ptr<Driver>: DriverMgr is sole owner. Each Driver has
+    // its own mutex for thread-safe availability management.
+    driverMgr->addDriver(make_unique<Driver>("D1", "David", 5));
+    driverMgr->addDriver(make_unique<Driver>("D2", "Emma", 4));
+    driverMgr->addDriver(make_unique<Driver>("D3", "Frank", 3));
+
+    cout << "Riders and Drivers registered." << endl;
+
+    // Locations
+    Location home(28.6139, 77.2090, "Home");
+    Location airport(28.5562, 77.1000, "Airport");
+    Location mall(28.5355, 77.3910, "Mall");
+    Location office(28.4595, 77.0266, "Office");
+
+    // ============================================================
+    // DEMO 1: Sequential trips (shows strategy selection)
+    // ============================================================
+    cout << "\n--- Sequential Trips ---" << endl;
+    tripMgr->createTrip("R1", home, airport);   // High rating + Airport -> Surge + HighRating
+    tripMgr->createTrip("R2", mall, office);    // Low rating -> Default + LeastTime
+
+    // ============================================================
+    // DEMO 2: Concurrent trips from multiple threads
+    // ----------------------------------------------------------
+    // CONCURRENCY IN ACTION:
+    // - TripManager uses lock_guard only for trip ID gen and storing trip
+    // - Strategy execution (pricing + matching) happens WITHOUT manager lock
+    // - Driver assignment uses per-driver lock (driver->tryAssign())
+    //   so two threads targeting DIFFERENT drivers proceed in parallel
+    //   but two threads targeting the SAME driver: one wins, one retries
+    // ============================================================
+    cout << "\n--- Concurrent Trips (3 threads, 1 driver left) ---" << endl;
+    cout << "Only 1 driver available. First thread wins, others get cancelled." << endl << endl;
+
+    // shared_ptr<Trip>: returned from createTrip. Trip is stored in
+    // TripManager's vector AND here. Both owners -> shared_ptr.
+    vector<shared_ptr<Trip>> results(3);
+
+    vector<thread> threads;
+    auto bookFn = [&](int idx, const string& riderId,
+                      const Location& src, const Location& dest) {
+        results[idx] = tripMgr->createTrip(riderId, src, dest);
+    };
+
+    threads.emplace_back(bookFn, 0, "R3", home, mall);
+    threads.emplace_back(bookFn, 1, "R4", office, airport);
+    threads.emplace_back(bookFn, 2, "R1", mall, airport);
+
+    for (auto& t : threads) t.join();
+
+    // ============================================================
+    // RESULTS
+    // ============================================================
+    tripMgr->displayAllTrips();
+
+    cout << "\nTotal trips: " << tripMgr->getTripCount() << endl;
+
+    // ============================================================
+    // CONCURRENCY SUMMARY:
+    // ----------------------------------------------------------
+    // Manager level:  lock_guard for simple ops (addRider, addDriver)
+    //                 lock_guard for trip ID generation + trip storage
+    //                 NO lock during strategy execution (pricing/matching)
+    //
+    // Driver level:   lock_guard inside tryAssign() and release()
+    //                 Atomic check-and-set prevents double-assignment
+    //
+    // WHY PESSIMISTIC?
+    //   Drivers are scarce resources with high contention.
+    //   Optimistic (version-based CAS) would cause retry storms
+    //   when many riders compete for few drivers.
+    //
+    // SMART POINTERS:
+    //   unique_ptr<Rider/Driver> -> managers are sole owners
+    //   shared_ptr<Trip>         -> manager + caller both hold refs
+    //   unique_ptr<Strategy>     -> created per-trip, sole ownership
+    //   raw ptr (Driver*/Rider*) -> non-owning refs in Trip
+    // ============================================================
+
+    cout << "\n=== Service Ended ===" << endl;
+    return 0;
+}
+\end{lstlisting}
+
+\end{document}

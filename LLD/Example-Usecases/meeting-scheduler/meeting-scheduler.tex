@@ -1,0 +1,751 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=0.8in]{geometry}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{titlesec}
+\usepackage{hyperref}
+\usepackage{fancyhdr}
+
+\definecolor{codebg}{RGB}{245,245,245}
+\definecolor{codegreen}{RGB}{0,128,0}
+\definecolor{codegray}{RGB}{128,128,128}
+\definecolor{codeblue}{RGB}{0,0,180}
+\definecolor{codepurple}{RGB}{128,0,128}
+
+\lstset{
+    language=C++,
+    backgroundcolor=\color{codebg},
+    basicstyle=\ttfamily\footnotesize,
+    keywordstyle=\color{codeblue}\bfseries,
+    commentstyle=\color{codegreen}\itshape,
+    stringstyle=\color{codepurple},
+    numberstyle=\tiny\color{codegray},
+    numbers=left,
+    numbersep=5pt,
+    frame=single,
+    breaklines=true,
+    breakatwhitespace=false,
+    tabsize=4,
+    showstringspaces=false,
+    captionpos=b,
+    morekeywords={override,nullptr,string,shared_ptr,unique_ptr,make_shared,make_unique,
+                  lock_guard,unique_lock,mutex,thread,vector,unordered_map,map,
+                  chrono,steady_clock,time_point,atomic},
+}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\textbf{LLD --- Meeting Scheduler}}
+\fancyhead[R]{\thepage}
+
+\title{\Huge\textbf{Meeting Scheduler}\\[0.3em]\Large Low-Level Design --- C++ Concurrency}
+\author{LLD Interview Preparation}
+\date{}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+% ============================================================
+\section{File Structure}
+% ============================================================
+\begin{verbatim}
+meeting-scheduler/
+  models.hpp       -- Interval, Participant (participantMtx),
+                      MeetingRoom (roomMtx), Meeting
+  strategies.hpp   -- RoomSelectionStrategy, MeetingObserver
+  managers.hpp     -- MeetingScheduler (Singleton)
+  main.cpp         -- Demo: sequential, concurrent, cancellation,
+                      strategy switch
+\end{verbatim}
+
+\textbf{Compilation:}
+\begin{verbatim}
+g++ -std=c++17 -pthread -o meeting_scheduler.exe main.cpp
+\end{verbatim}
+
+\subsection{Concurrency Summary}
+\begin{itemize}
+    \item \textbf{Level 1:} \texttt{schedulerMtx} (MeetingScheduler) --- meetings, rooms, participants
+    \item \textbf{Level 2:} \texttt{roomMtx} (per-MeetingRoom) --- room bookings
+    \item \textbf{Level 3:} \texttt{participantMtx} (per-Participant) --- participant schedule
+    \item \textbf{Lock order:} always L1 $\rightarrow$ L2 $\rightarrow$ L3 (never reverse)
+    \item Release L1 before per-resource locks where possible
+    \item Rollback on participant conflict (undo booked participants)
+\end{itemize}
+
+\subsection{Design Patterns}
+\begin{itemize}
+    \item \textbf{Singleton:} MeetingScheduler
+    \item \textbf{Strategy:} BestFitRoomStrategy, FirstFitRoomStrategy, LargestRoomStrategy
+    \item \textbf{Observer:} EmailNotifier, CalendarSyncObserver
+\end{itemize}
+
+\subsection{Smart Pointers}
+\begin{itemize}
+    \item \texttt{unique\_ptr<MeetingRoom>} --- scheduler sole owner
+    \item \texttt{unique\_ptr<Participant>} --- scheduler sole owner
+    \item \texttt{shared\_ptr<Meeting>} --- scheduler map + caller
+    \item \texttt{unique\_ptr<RoomSelectionStrategy>} --- scheduler sole owner
+    \item \texttt{shared\_ptr<MeetingObserver>} --- scheduler vector + caller
+\end{itemize}
+
+% ============================================================
+\newpage
+\section{models.hpp}
+% ============================================================
+\begin{lstlisting}[title={\texttt{models.hpp}}]
+#ifndef MODELS_HPP
+#define MODELS_HPP
+
+#include <string>
+#include <vector>
+#include <iostream>
+#include <mutex>
+#include <memory>
+#include <algorithm>
+using namespace std;
+
+// ============================================================
+// INTERVAL
+// ============================================================
+class Interval {
+    int start, end;
+public:
+    Interval(int s, int e) : start(s), end(e) {
+        if (s >= e) throw invalid_argument("start must be < end");
+    }
+    int getStart() const { return start; }
+    int getEnd() const { return end; }
+    bool overlaps(const Interval& o) const {
+        return start < o.end && o.start < end;
+    }
+};
+
+// ============================================================
+// PARTICIPANT
+// ============================================================
+class Participant {
+    string id;
+    string name;
+    // Per-participant calendar with its own mutex
+    // PESSIMISTIC: lock before checking/modifying schedule
+    vector<Interval> schedule;
+    mutable mutex participantMtx;
+
+public:
+    Participant(const string& id, const string& name)
+        : id(id), name(name) {}
+
+    string getId() const { return id; }
+    string getName() const { return name; }
+
+    // Check if participant is free during interval
+    bool isFree(const Interval& interval) const {
+        lock_guard<mutex> lock(participantMtx);
+        for (const auto& s : schedule) {
+            if (s.overlaps(interval)) return false;
+        }
+        return true;
+    }
+
+    // Atomically check and book slot -- returns false if conflict
+    bool tryBook(const Interval& interval) {
+        lock_guard<mutex> lock(participantMtx);
+        for (const auto& s : schedule) {
+            if (s.overlaps(interval)) return false;
+        }
+        schedule.push_back(interval);
+        return true;
+    }
+
+    // Remove a booked slot (for cancellation)
+    void removeSlot(const Interval& interval) {
+        lock_guard<mutex> lock(participantMtx);
+        schedule.erase(
+            remove_if(schedule.begin(), schedule.end(),
+                [&](const Interval& s) {
+                    return s.getStart() == interval.getStart() &&
+                           s.getEnd() == interval.getEnd();
+                }),
+            schedule.end());
+    }
+
+    void displaySchedule() const {
+        lock_guard<mutex> lock(participantMtx);
+        cout << "    " << name << ": ";
+        if (schedule.empty()) { cout << "free" << endl; return; }
+        for (const auto& s : schedule)
+            cout << "[" << s.getStart() << "-" << s.getEnd() << "] ";
+        cout << endl;
+    }
+};
+
+// ============================================================
+// MEETING ROOM
+// Has its own mutex for per-room locking.
+// Multiple rooms can be booked in parallel (no contention).
+// ============================================================
+class MeetingRoom {
+    string id;
+    int capacity;
+    vector<Interval> bookings;
+    mutable mutex roomMtx;
+
+public:
+    MeetingRoom(const string& id, int cap)
+        : id(id), capacity(cap) {}
+
+    string getId() const { return id; }
+    int getCapacity() const { return capacity; }
+
+    bool isAvailable(const Interval& interval) const {
+        lock_guard<mutex> lock(roomMtx);
+        for (const auto& b : bookings) {
+            if (b.overlaps(interval)) return false;
+        }
+        return true;
+    }
+
+    // Atomic check-and-book
+    bool tryBook(const Interval& interval) {
+        lock_guard<mutex> lock(roomMtx);
+        for (const auto& b : bookings) {
+            if (b.overlaps(interval)) return false;
+        }
+        bookings.push_back(interval);
+        return true;
+    }
+
+    void cancelSlot(const Interval& interval) {
+        lock_guard<mutex> lock(roomMtx);
+        bookings.erase(
+            remove_if(bookings.begin(), bookings.end(),
+                [&](const Interval& b) {
+                    return b.getStart() == interval.getStart() &&
+                           b.getEnd() == interval.getEnd();
+                }),
+            bookings.end());
+    }
+
+    void display() const {
+        lock_guard<mutex> lock(roomMtx);
+        cout << "  Room[" << id << "] cap=" << capacity << " bookings: ";
+        if (bookings.empty()) { cout << "none" << endl; return; }
+        for (const auto& b : bookings)
+            cout << "[" << b.getStart() << "-" << b.getEnd() << "] ";
+        cout << endl;
+    }
+};
+
+// ============================================================
+// MEETING
+// Stores meeting info. No mutex needed -- immutable after creation,
+// only modified under MeetingScheduler's lock for cancellation.
+// ============================================================
+enum class MeetingStatus { SCHEDULED, CANCELLED };
+
+class Meeting {
+    string meetingId;
+    string organizerId;
+    Interval interval;
+    vector<string> participantIds;
+    string roomId;
+    MeetingStatus status;
+
+public:
+    Meeting(const string& id, const string& organizer, const Interval& interval,
+            const vector<string>& participants, const string& room)
+        : meetingId(id), organizerId(organizer), interval(interval),
+          participantIds(participants), roomId(room),
+          status(MeetingStatus::SCHEDULED) {}
+
+    string getId() const { return meetingId; }
+    string getOrganizerId() const { return organizerId; }
+    const Interval& getInterval() const { return interval; }
+    const vector<string>& getParticipantIds() const { return participantIds; }
+    string getRoomId() const { return roomId; }
+    MeetingStatus getStatus() const { return status; }
+    void setStatus(MeetingStatus s) { status = s; }
+
+    void display() const {
+        cout << "  Meeting[" << meetingId << "] "
+             << "[" << interval.getStart() << "-" << interval.getEnd() << "] "
+             << "Room: " << roomId << " Organizer: " << organizerId
+             << " Participants: ";
+        for (const auto& p : participantIds) cout << p << " ";
+        cout << "| " << (status == MeetingStatus::SCHEDULED ? "SCHEDULED" : "CANCELLED")
+             << endl;
+    }
+};
+
+#endif
+\end{lstlisting}
+
+% ============================================================
+\newpage
+\section{strategies.hpp}
+% ============================================================
+\begin{lstlisting}[title={\texttt{strategies.hpp}}]
+#ifndef STRATEGIES_HPP
+#define STRATEGIES_HPP
+
+#include "models.hpp"
+#include <vector>
+#include <memory>
+using namespace std;
+
+// ============================================================
+// STRATEGY PATTERN: Room Selection
+// Different policies for how to pick a room.
+// unique_ptr<RoomSelectionStrategy>: MeetingScheduler is sole owner.
+// ============================================================
+
+class RoomSelectionStrategy {
+public:
+    virtual ~RoomSelectionStrategy() = default;
+    virtual MeetingRoom* selectRoom(vector<unique_ptr<MeetingRoom>>& rooms,
+                                     int requiredCapacity,
+                                     const Interval& interval) = 0;
+    virtual string getName() const = 0;
+};
+
+// Pick smallest room that fits (minimize waste)
+class BestFitRoomStrategy : public RoomSelectionStrategy {
+public:
+    MeetingRoom* selectRoom(vector<unique_ptr<MeetingRoom>>& rooms,
+                             int requiredCapacity,
+                             const Interval& interval) override {
+        MeetingRoom* best = nullptr;
+        int bestCap = INT_MAX;
+        for (auto& r : rooms) {
+            if (r->getCapacity() >= requiredCapacity &&
+                r->getCapacity() < bestCap &&
+                r->isAvailable(interval)) {
+                best = r.get();
+                bestCap = r->getCapacity();
+            }
+        }
+        return best;
+    }
+    string getName() const override { return "BestFit"; }
+};
+
+// Pick first available room that fits
+class FirstFitRoomStrategy : public RoomSelectionStrategy {
+public:
+    MeetingRoom* selectRoom(vector<unique_ptr<MeetingRoom>>& rooms,
+                             int requiredCapacity,
+                             const Interval& interval) override {
+        for (auto& r : rooms) {
+            if (r->getCapacity() >= requiredCapacity &&
+                r->isAvailable(interval)) {
+                return r.get();
+            }
+        }
+        return nullptr;
+    }
+    string getName() const override { return "FirstFit"; }
+};
+
+// Pick largest room available (luxury mode)
+class LargestRoomStrategy : public RoomSelectionStrategy {
+public:
+    MeetingRoom* selectRoom(vector<unique_ptr<MeetingRoom>>& rooms,
+                             int requiredCapacity,
+                             const Interval& interval) override {
+        MeetingRoom* best = nullptr;
+        int bestCap = 0;
+        for (auto& r : rooms) {
+            if (r->getCapacity() >= requiredCapacity &&
+                r->getCapacity() > bestCap &&
+                r->isAvailable(interval)) {
+                best = r.get();
+                bestCap = r->getCapacity();
+            }
+        }
+        return best;
+    }
+    string getName() const override { return "Largest"; }
+};
+
+// ============================================================
+// OBSERVER PATTERN: Meeting Notifications
+// shared_ptr<MeetingObserver>: shared between scheduler's vector
+// and caller (to remove later). Shared ownership.
+// ============================================================
+
+class MeetingObserver {
+public:
+    virtual ~MeetingObserver() = default;
+    virtual void onMeetingScheduled(const Meeting& m) = 0;
+    virtual void onMeetingCancelled(const Meeting& m) = 0;
+    virtual string getName() const = 0;
+};
+
+class EmailNotifier : public MeetingObserver {
+public:
+    void onMeetingScheduled(const Meeting& m) override {
+        cout << "    [Email] Meeting " << m.getId() << " scheduled "
+             << "[" << m.getInterval().getStart() << "-"
+             << m.getInterval().getEnd() << "] Room: " << m.getRoomId() << endl;
+    }
+    void onMeetingCancelled(const Meeting& m) override {
+        cout << "    [Email] Meeting " << m.getId() << " cancelled" << endl;
+    }
+    string getName() const override { return "Email"; }
+};
+
+class CalendarSyncObserver : public MeetingObserver {
+public:
+    void onMeetingScheduled(const Meeting& m) override {
+        cout << "    [Calendar] Synced meeting " << m.getId() << endl;
+    }
+    void onMeetingCancelled(const Meeting& m) override {
+        cout << "    [Calendar] Removed meeting " << m.getId() << endl;
+    }
+    string getName() const override { return "CalendarSync"; }
+};
+
+#endif
+\end{lstlisting}
+
+% ============================================================
+\newpage
+\section{managers.hpp}
+% ============================================================
+\begin{lstlisting}[title={\texttt{managers.hpp}}]
+#ifndef MANAGERS_HPP
+#define MANAGERS_HPP
+
+#include "strategies.hpp"
+#include <unordered_map>
+#include <mutex>
+#include <thread>
+using namespace std;
+
+// ============================================================
+// LOCKING: 3-level pessimistic
+// Level 1: schedulerMtx (MeetingScheduler) -> meetings map, rooms, participants
+// Level 2: roomMtx (per-MeetingRoom) -> room bookings
+// Level 3: participantMtx (per-Participant) -> participant schedule
+//
+// LOCK ORDER: always L1 -> L2 -> L3 (never reverse)
+// Release L1 before per-resource locks where possible.
+//
+// SMART POINTERS:
+//   unique_ptr<MeetingRoom>     -> scheduler is sole owner of rooms
+//   unique_ptr<Participant>     -> scheduler is sole owner of participants
+//   shared_ptr<Meeting>         -> scheduler map + caller both hold ref
+//   unique_ptr<RoomStrategy>    -> scheduler sole owner, swapped via move()
+//   shared_ptr<MeetingObserver> -> scheduler vector + caller (to remove)
+// ============================================================
+
+class MeetingScheduler {
+    static mutex singletonMtx;
+    mutable mutex schedulerMtx;
+
+    vector<unique_ptr<MeetingRoom>> rooms;
+    unordered_map<string, unique_ptr<Participant>> participants;
+    unordered_map<string, shared_ptr<Meeting>> meetings;
+    unique_ptr<RoomSelectionStrategy> roomStrategy;
+    vector<shared_ptr<MeetingObserver>> observers;
+    int meetingCounter = 0;
+
+    MeetingScheduler() {
+        roomStrategy = make_unique<BestFitRoomStrategy>();
+    }
+
+    // Snapshot pattern: copy observers under lock, notify outside
+    void notifyScheduled(const Meeting& m) {
+        vector<shared_ptr<MeetingObserver>> snap;
+        { lock_guard<mutex> lock(schedulerMtx); snap = observers; }
+        for (auto& obs : snap) obs->onMeetingScheduled(m);
+    }
+
+    void notifyCancelled(const Meeting& m) {
+        vector<shared_ptr<MeetingObserver>> snap;
+        { lock_guard<mutex> lock(schedulerMtx); snap = observers; }
+        for (auto& obs : snap) obs->onMeetingCancelled(m);
+    }
+
+public:
+    static MeetingScheduler* getInstance() {
+        lock_guard<mutex> lock(singletonMtx);
+        static MeetingScheduler instance;
+        return &instance;
+    }
+
+    void setRoomStrategy(unique_ptr<RoomSelectionStrategy> strategy) {
+        lock_guard<mutex> lock(schedulerMtx);
+        roomStrategy = move(strategy);
+        cout << "[Scheduler] Room strategy: " << roomStrategy->getName() << endl;
+    }
+
+    void addRoom(const string& id, int capacity) {
+        lock_guard<mutex> lock(schedulerMtx);
+        rooms.push_back(make_unique<MeetingRoom>(id, capacity));
+        cout << "[Scheduler] Room added: " << id << " (cap " << capacity << ")" << endl;
+    }
+
+    void addParticipant(const string& id, const string& name) {
+        lock_guard<mutex> lock(schedulerMtx);
+        participants[id] = make_unique<Participant>(id, name);
+        cout << "[Scheduler] Participant added: " << name << endl;
+    }
+
+    void addObserver(shared_ptr<MeetingObserver> obs) {
+        lock_guard<mutex> lock(schedulerMtx);
+        observers.push_back(obs);
+    }
+
+    // ============================================================
+    // SCHEDULE MEETING -- core concurrent operation
+    // 1. Lock scheduler to generate ID, look up participants, select room
+    // 2. Release scheduler lock
+    // 3. Lock each participant (Level 3) to check/book their schedule
+    // 4. Lock room (Level 2) to book the room
+    // 5. Lock scheduler again to store meeting
+    // ============================================================
+    shared_ptr<Meeting> scheduleMeeting(const string& organizerId,
+                                         const vector<string>& participantIds,
+                                         int start, int end) {
+        Interval interval(start, end);
+        string meetingId;
+        vector<Participant*> participantPtrs;
+        MeetingRoom* room = nullptr;
+
+        // Step 1: Under scheduler lock -- ID gen, lookups, room selection
+        {
+            lock_guard<mutex> lock(schedulerMtx);
+            meetingId = "MTG_" + to_string(++meetingCounter);
+
+            // Verify all participants exist
+            for (const auto& pid : participantIds) {
+                auto it = participants.find(pid);
+                if (it == participants.end()) {
+                    cout << "[Thread " << this_thread::get_id() << "] "
+                         << "Participant not found: " << pid << endl;
+                    return nullptr;
+                }
+                participantPtrs.push_back(it->second.get());
+            }
+
+            // Select room (strategy reads room availability -- room locks itself)
+            int requiredCap = participantIds.size();
+            room = roomStrategy->selectRoom(rooms, requiredCap, interval);
+            if (!room) {
+                cout << "[Thread " << this_thread::get_id() << "] "
+                     << meetingId << " FAILED: no room available" << endl;
+                return nullptr;
+            }
+        }
+        // Scheduler lock released
+
+        // Step 2: Check & book each participant (per-participant lock)
+        vector<Participant*> booked;
+        bool allFree = true;
+        for (auto* p : participantPtrs) {
+            if (p->tryBook(interval)) {
+                booked.push_back(p);
+            } else {
+                allFree = false;
+                cout << "[Thread " << this_thread::get_id() << "] "
+                     << meetingId << " CONFLICT: " << p->getName()
+                     << " busy [" << start << "-" << end << "]" << endl;
+                break;
+            }
+        }
+
+        // Rollback if any participant had a conflict
+        if (!allFree) {
+            for (auto* p : booked) p->removeSlot(interval);
+            return nullptr;
+        }
+
+        // Step 3: Book the room (per-room lock)
+        if (!room->tryBook(interval)) {
+            // Room got taken between strategy check and booking (race)
+            for (auto* p : booked) p->removeSlot(interval);
+            cout << "[Thread " << this_thread::get_id() << "] "
+                 << meetingId << " FAILED: room " << room->getId()
+                 << " taken (race)" << endl;
+            return nullptr;
+        }
+
+        // Step 4: Store meeting under scheduler lock
+        auto meeting = make_shared<Meeting>(meetingId, organizerId, interval,
+                                             participantIds, room->getId());
+        {
+            lock_guard<mutex> lock(schedulerMtx);
+            meetings[meetingId] = meeting;
+        }
+
+        cout << "[Thread " << this_thread::get_id() << "] "
+             << meetingId << " scheduled [" << start << "-" << end << "] "
+             << "Room: " << room->getId() << endl;
+
+        notifyScheduled(*meeting);
+        return meeting;
+    }
+
+    // ============================================================
+    // CANCEL MEETING
+    // Release room slot, release participant slots, mark cancelled
+    // ============================================================
+    bool cancelMeeting(const string& meetingId) {
+        shared_ptr<Meeting> meeting;
+        {
+            lock_guard<mutex> lock(schedulerMtx);
+            auto it = meetings.find(meetingId);
+            if (it == meetings.end()) {
+                cout << "Meeting not found: " << meetingId << endl;
+                return false;
+            }
+            meeting = it->second;
+        }
+
+        if (meeting->getStatus() == MeetingStatus::CANCELLED) {
+            cout << "Meeting already cancelled: " << meetingId << endl;
+            return false;
+        }
+
+        // Release room
+        {
+            lock_guard<mutex> lock(schedulerMtx);
+            for (auto& r : rooms) {
+                if (r->getId() == meeting->getRoomId()) {
+                    r->cancelSlot(meeting->getInterval());
+                    break;
+                }
+            }
+        }
+
+        // Release participants
+        {
+            lock_guard<mutex> lock(schedulerMtx);
+            for (const auto& pid : meeting->getParticipantIds()) {
+                auto it = participants.find(pid);
+                if (it != participants.end()) {
+                    it->second->removeSlot(meeting->getInterval());
+                }
+            }
+        }
+
+        meeting->setStatus(MeetingStatus::CANCELLED);
+        cout << "[Thread " << this_thread::get_id() << "] "
+             << meetingId << " cancelled" << endl;
+
+        notifyCancelled(*meeting);
+        return true;
+    }
+
+    void displayMeetings() {
+        lock_guard<mutex> lock(schedulerMtx);
+        cout << "\n=== All Meetings ===" << endl;
+        for (auto& [id, m] : meetings) m->display();
+    }
+
+    void displayRooms() {
+        lock_guard<mutex> lock(schedulerMtx);
+        cout << "\n=== Rooms ===" << endl;
+        for (auto& r : rooms) r->display();
+    }
+
+    void displayParticipants() {
+        lock_guard<mutex> lock(schedulerMtx);
+        cout << "\n=== Participants ===" << endl;
+        for (auto& [id, p] : participants) p->displaySchedule();
+    }
+
+    MeetingScheduler(const MeetingScheduler&) = delete;
+    MeetingScheduler& operator=(const MeetingScheduler&) = delete;
+};
+
+mutex MeetingScheduler::singletonMtx;
+
+#endif
+\end{lstlisting}
+
+% ============================================================
+\newpage
+\section{main.cpp}
+% ============================================================
+\begin{lstlisting}[title={\texttt{main.cpp}}]
+#include <iostream>
+#include <thread>
+#include <vector>
+#include "managers.hpp"
+using namespace std;
+
+int main() {
+    auto* sched = MeetingScheduler::getInstance();
+
+    cout << "=== Meeting Scheduler ===" << endl << endl;
+
+    // Observers
+    sched->addObserver(make_shared<EmailNotifier>());
+    sched->addObserver(make_shared<CalendarSyncObserver>());
+
+    // Rooms (unique_ptr<MeetingRoom>: scheduler sole owner)
+    sched->addRoom("R1", 5);
+    sched->addRoom("R2", 10);
+    sched->addRoom("R3", 3);
+
+    // Participants (unique_ptr<Participant>: scheduler sole owner)
+    sched->addParticipant("P1", "Alice");
+    sched->addParticipant("P2", "Bob");
+    sched->addParticipant("P3", "Charlie");
+    sched->addParticipant("P4", "Diana");
+
+    // ========== Sequential meetings ==========
+    cout << "\n--- Sequential Meetings ---" << endl;
+    sched->scheduleMeeting("P1", {"P1", "P2"}, 9, 10);         // R3 (best fit, cap 3 >= 2)
+    sched->scheduleMeeting("P2", {"P2", "P3", "P4"}, 10, 12);  // R1 (best fit, cap 5 >= 3)
+    sched->scheduleMeeting("P1", {"P1", "P2"}, 9, 11);         // FAIL: P1 & P2 busy 9-10
+
+    // ========== Strategy switch ==========
+    cout << "\n--- Switch to LargestRoom strategy ---" << endl;
+    sched->setRoomStrategy(make_unique<LargestRoomStrategy>());
+    sched->scheduleMeeting("P3", {"P3", "P4"}, 9, 10);  // Gets R2 (largest)
+
+    // ========== Concurrent meetings ==========
+    // 3 threads try to book overlapping slots
+    // Per-participant locks detect conflicts atomically
+    // Per-room locks prevent double-booking
+    cout << "\n--- Concurrent Meetings (3 threads race for 14-15) ---" << endl;
+    sched->setRoomStrategy(make_unique<FirstFitRoomStrategy>());
+
+    vector<shared_ptr<Meeting>> results(3);
+    vector<thread> threads;
+
+    auto bookFn = [&](int idx, const string& org, vector<string> parts, int s, int e) {
+        results[idx] = sched->scheduleMeeting(org, parts, s, e);
+    };
+
+    threads.emplace_back(bookFn, 0, "P1", vector<string>{"P1", "P2"}, 14, 15);
+    threads.emplace_back(bookFn, 1, "P3", vector<string>{"P3", "P2"}, 14, 15); // P2 conflict
+    threads.emplace_back(bookFn, 2, "P4", vector<string>{"P4"}, 14, 15);       // Different people, OK
+
+    for (auto& t : threads) t.join();
+
+    // ========== Cancellation ==========
+    cout << "\n--- Cancellation ---" << endl;
+    sched->cancelMeeting("MTG_1");
+    // Now P1 and P2 are free 9-10, R3 is free 9-10
+    cout << "\n--- Rebooking after cancellation ---" << endl;
+    sched->scheduleMeeting("P3", {"P1", "P2"}, 9, 10);  // Should succeed now
+
+    // ========== Display ==========
+    sched->displayMeetings();
+    sched->displayRooms();
+    sched->displayParticipants();
+
+    cout << "\n=== Done ===" << endl;
+    return 0;
+}
+\end{lstlisting}
+
+\end{document}

@@ -1,0 +1,602 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=0.8in]{geometry}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{titlesec}
+\usepackage{hyperref}
+\usepackage{fancyhdr}
+
+\definecolor{codebg}{RGB}{245,245,245}
+\definecolor{codegreen}{RGB}{0,128,0}
+\definecolor{codegray}{RGB}{128,128,128}
+\definecolor{codeblue}{RGB}{0,0,180}
+\definecolor{codepurple}{RGB}{128,0,128}
+
+\lstset{
+    language=C++,
+    backgroundcolor=\color{codebg},
+    basicstyle=\ttfamily\footnotesize,
+    keywordstyle=\color{codeblue}\bfseries,
+    commentstyle=\color{codegreen}\itshape,
+    stringstyle=\color{codepurple},
+    numberstyle=\tiny\color{codegray},
+    numbers=left,
+    numbersep=5pt,
+    frame=single,
+    breaklines=true,
+    breakatwhitespace=false,
+    tabsize=4,
+    showstringspaces=false,
+    captionpos=b,
+    morekeywords={override,nullptr,string,shared_ptr,unique_ptr,make_shared,make_unique,
+                  lock_guard,unique_lock,mutex,thread,vector,unordered_map,map,
+                  chrono,steady_clock,time_point,atomic},
+}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\textbf{LLD --- Parking Lot}}
+\fancyhead[R]{\thepage}
+
+\title{\Huge\textbf{Parking Lot}\\[0.3em]\Large Low-Level Design --- C++ Concurrency}
+\author{LLD Interview Preparation}
+\date{}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+% ============================================================
+\section{File Structure}
+% ============================================================
+\begin{verbatim}
+parking-lot/
+  models.hpp       -- Vehicle, ParkingSpot, ParkingFloor, Ticket
+  strategies.hpp   -- PaymentStrategy, RateStrategy
+  managers.hpp     -- ParkingManager (Singleton)
+  main.cpp         -- Demo: concurrent parking/unparking
+\end{verbatim}
+
+\textbf{Compilation:}
+\begin{verbatim}
+g++ -std=c++17 -pthread -o parking_lot.exe main.cpp
+\end{verbatim}
+
+\subsection{Concurrency Summary}
+\begin{itemize}
+    \item \textbf{Level 1:} \texttt{operationMtx} (ParkingManager) --- floors, activeTickets, ticketCounter
+    \item \textbf{Level 2:} None (single manager lock suffices)
+    \item \textbf{lock\_guard:} \texttt{parkVehicle}, \texttt{setRateStrategy}, \texttt{addFloor}
+    \item \textbf{unique\_lock:} \texttt{unparkVehicle} (release before payment I/O)
+\end{itemize}
+
+\subsection{Smart Pointers}
+\begin{itemize}
+    \item \texttt{shared\_ptr<Ticket>} --- manager map + caller both hold ref
+    \item \texttt{raw ptr (RateStrategy*)} --- non-owning, caller owns strategy
+    \item \texttt{raw ptr (Vehicle*)} --- non-owning, caller owns vehicles
+\end{itemize}
+
+% ============================================================
+\newpage
+\section{models.hpp}
+% ============================================================
+\begin{lstlisting}[title={\texttt{models.hpp}}]
+#ifndef MODELS_HPP
+#define MODELS_HPP
+
+#include<bits/stdc++.h>
+#include<string>
+#include<chrono>
+using namespace std;
+
+enum class VehicleType{
+    BIKE,
+    CAR,
+    TRUCK
+};
+
+enum class SpotType{
+    SMALL,
+    MEDIUM,
+    LARGE
+};
+
+enum class TicketStatus{
+    ACTIVE,
+    PAID
+};
+
+class Vehicle{
+  private:
+    string licensePlate;
+    VehicleType type;
+  public:
+    Vehicle() : licensePlate(""), type(VehicleType::CAR) {}
+    Vehicle(string plate, VehicleType vtype): licensePlate(plate), type(vtype) {}
+
+    VehicleType getType() const { return type; }
+    string getLicensePlate() const { return licensePlate; }
+};
+
+class ParkingSpot{
+    private:
+        string spotId;
+        bool isOccupied;
+        SpotType type;
+        Vehicle* currentVehicle;
+     
+    public:
+        ParkingSpot() : spotId(""), isOccupied(false), type(SpotType::SMALL), currentVehicle(nullptr) {}
+        ParkingSpot(string id, SpotType stype)
+            : spotId(id), isOccupied(false), type(stype), currentVehicle(nullptr) {}
+
+        bool canFit(VehicleType vtype){
+            if(isOccupied) return false;
+            if((vtype == VehicleType::BIKE && type == SpotType::SMALL) ||
+               (vtype == VehicleType::CAR && type == SpotType::MEDIUM) ||
+               (vtype == VehicleType::TRUCK && type == SpotType::LARGE)){
+                return true;
+            }
+            return false;
+        }
+
+        void park(Vehicle* v){
+            this->currentVehicle = v;
+            isOccupied = true;
+        }
+
+        void unpark(){
+            this->currentVehicle = nullptr;
+            isOccupied = false;
+        }
+
+        string getSpotId() const { return spotId; }
+        bool getIsOccupied() const { return isOccupied; }
+        SpotType getType() const { return type; }
+}; 
+
+
+class ParkingFloor{
+    private:
+    int floorNumber;
+    vector<ParkingSpot> spots;
+
+    public:
+    ParkingFloor() : floorNumber(0) {}
+    ParkingFloor(int num, vector<ParkingSpot> s) : floorNumber(num), spots(s) {}
+
+    ParkingSpot* findAvailableSpot(VehicleType vtype){
+        for(auto& spot : spots){
+            if(spot.canFit(vtype)){
+                return &spot;
+            }
+        }
+        return nullptr;
+    }
+
+    int getFloorNumber() const { return floorNumber; }
+};
+
+class Ticket{
+    private:
+    string ticketId;
+    Vehicle vehicle;
+    ParkingSpot* spot;
+    chrono::steady_clock::time_point entryTime;
+    chrono::steady_clock::time_point exitTime;
+    TicketStatus status;
+    double amount;
+
+    public:
+    Ticket() : spot(nullptr), status(TicketStatus::ACTIVE), amount(0.0) {}
+    Ticket(string id, Vehicle v, ParkingSpot* s, chrono::steady_clock::time_point entry)
+        : ticketId(id), vehicle(v), spot(s), entryTime(entry),
+          exitTime(), status(TicketStatus::ACTIVE), amount(0.0) {}
+
+    string getTicketId() const { return ticketId; }
+    Vehicle getVehicle() const { return vehicle; }
+    ParkingSpot* getSpot() const { return spot; }
+    TicketStatus getStatus() const { return status; }
+    double getAmount() const { return amount; }
+    chrono::steady_clock::time_point getEntryTime() const { return entryTime; }
+    chrono::steady_clock::time_point getExitTime() const { return exitTime; }
+
+    long long getDurationMinutes() const {
+        auto duration = chrono::duration_cast<chrono::minutes>(exitTime - entryTime);
+        return max(1LL, duration.count());
+    }
+
+    void setExitTime(chrono::steady_clock::time_point t) { exitTime = t; }
+    void setStatus(TicketStatus s) { status = s; }
+    void setAmount(double a) { amount = a; }
+};
+
+#endif
+\end{lstlisting}
+
+% ============================================================
+\newpage
+\section{strategies.hpp}
+% ============================================================
+\begin{lstlisting}[title={\texttt{strategies.hpp}}]
+#ifndef STRATEGIES_HPP
+#define STRATEGIES_HPP
+
+#include<iostream>
+using namespace std;
+
+
+class PaymentStrategy{
+    public:
+    virtual bool pay(double amount) = 0;
+    virtual ~PaymentStrategy() {}
+};
+
+class CashPayment: public PaymentStrategy {
+   public:
+   bool pay(double amount) override {
+       cout << "Paid $" << amount << " in cash." << endl;
+       return true;
+   }
+};
+
+class CardPayment: public PaymentStrategy {
+   public:
+   bool pay(double amount) override {
+       cout << "Paid $" << amount << " by card." << endl;
+       return true;
+   }
+};
+
+class RateStrategy{
+    public:
+    virtual double calculateRate(long long minutes) = 0;
+    virtual ~RateStrategy() {}
+};
+
+class HourlyRateStrategy: public RateStrategy {
+    double ratePerHour;
+    public:
+    HourlyRateStrategy(double rate = 10.0) : ratePerHour(rate) {}
+    double calculateRate(long long minutes) override {
+        double hours = (minutes + 59) / 60.0;
+        double amount = hours * ratePerHour;
+        cout << "Hourly rate: " << ratePerHour << "/hr x " << hours << " hrs = $" << amount << endl;
+        return amount;
+    }
+};
+
+class FlatRateStrategy: public RateStrategy {
+    double flatRate;
+    public:
+    FlatRateStrategy(double rate = 50.0) : flatRate(rate) {}
+    double calculateRate(long long minutes) override {
+        cout << "Flat rate applied: $" << flatRate << " (duration: " << minutes << " min)" << endl;
+        return flatRate;
+    }
+};
+
+#endif
+\end{lstlisting}
+
+% ============================================================
+\newpage
+\section{managers.hpp}
+% ============================================================
+\begin{lstlisting}[title={\texttt{managers.hpp}}]
+#ifndef MANAGERS_HPP
+#define MANAGERS_HPP
+
+#include<bits/stdc++.h>
+#include<mutex>
+#include<memory>
+#include<algorithm>
+#include<thread>
+#include "models.hpp"
+#include "strategies.hpp"
+using namespace std;
+
+// ============================================================
+// SMART POINTER CHEAT SHEET:
+// ----------------------------------------------------------
+// unique_ptr  -> sole ownership, non-copyable, lightweight
+//   Use when: one owner (e.g., singleton instance, owned children)
+// shared_ptr  -> shared ownership, ref-counted, heavier
+//   Use when: multiple owners need to keep object alive
+//   (e.g., Ticket returned to caller but also stored in map)
+// raw ptr     -> non-owning reference (observer)
+//   Use when: you don't own the object (e.g., rateStrategy set from outside)
+// ============================================================
+
+// ============================================================
+// LOCK CHEAT SHEET:
+// ----------------------------------------------------------
+// lock_guard<mutex>   -> simple RAII lock, locks in ctor, unlocks in dtor
+//   Use when: you hold the lock for the ENTIRE scope, no early unlock needed
+//   (e.g., singleton creation, simple read/write to shared state)
+//
+// unique_lock<mutex>  -> flexible RAII lock, supports:
+//   - early unlock/relock via .unlock()/.lock()
+//   - deferred locking (defer_lock)
+//   - try_lock (non-blocking attempt)
+//   - condition_variable (requires unique_lock, not lock_guard)
+//   Use when: you need to unlock mid-scope (e.g., release lock
+//   before doing expensive I/O like payment processing)
+// ============================================================
+
+class ParkingManager{
+    private:
+    static ParkingManager* instance;
+    static mutex singletonMtx;       // only for singleton creation
+
+    // operationMtx: guards shared mutable state (floors, activeTickets, ticketCounter)
+    // WHY mutex here? Multiple threads can call parkVehicle/unparkVehicle concurrently.
+    // Without this, two threads could find the same spot available and double-park.
+    mutable mutex operationMtx;
+
+    vector<ParkingFloor> floors;
+    // shared_ptr<Ticket>: ticket is owned by the map AND returned to caller.
+    // Both may need it alive -> shared ownership -> shared_ptr
+    map<string, shared_ptr<Ticket>> activeTickets;
+
+    // raw ptr: ParkingManager does NOT own the strategy.
+    // Caller owns it and can swap it anytime. Non-owning observer.
+    RateStrategy* rateStrategy;
+    int ticketCounter;
+
+    ParkingManager() : rateStrategy(nullptr), ticketCounter(0) {}
+
+    public:
+    ParkingManager(const ParkingManager&) = delete;
+    ParkingManager& operator=(const ParkingManager&) = delete;
+
+    static ParkingManager* getInstance(){
+        // Double-checked locking for singleton
+        // lock_guard is enough here: we hold the lock for the entire if-block
+        if(instance == nullptr){
+            lock_guard<mutex> lock(singletonMtx);
+            if(instance == nullptr){
+                instance = new ParkingManager();
+            }
+        }
+        return instance;
+    }
+
+    void setRateStrategy(RateStrategy* strategy){
+        lock_guard<mutex> lock(operationMtx);
+        rateStrategy = strategy;
+    }
+
+    void addFloor(ParkingFloor floor){
+        lock_guard<mutex> lock(operationMtx);
+        floors.push_back(floor);
+    }
+
+    shared_ptr<Ticket> parkVehicle(Vehicle* vehicle){
+        // lock_guard: we need the lock for the entire duration of finding a spot
+        // and creating a ticket. If we released early, another thread could
+        // grab the same spot between our find and park calls (race condition).
+        lock_guard<mutex> lock(operationMtx);
+
+        for(auto& floor : floors){
+            ParkingSpot* spot = floor.findAvailableSpot(vehicle->getType());
+            if(spot != nullptr){
+                spot->park(vehicle);
+                string ticketId = "TKT-" + to_string(++ticketCounter);
+                auto ticket = make_shared<Ticket>(ticketId, *vehicle, spot, chrono::steady_clock::now());
+                activeTickets[ticketId] = ticket;
+                cout << "[Thread " << this_thread::get_id() << "] "
+                     << "Vehicle " << vehicle->getLicensePlate()
+                     << " parked at spot " << spot->getSpotId()
+                     << " on floor " << floor.getFloorNumber()
+                     << " | Ticket: " << ticketId << endl;
+                return ticket;
+            }
+        }
+        cout << "[Thread " << this_thread::get_id() << "] "
+             << "No available spot for vehicle " << vehicle->getLicensePlate() << endl;
+        return nullptr;
+    }
+
+    void unparkVehicle(string ticketId, PaymentStrategy* paymentStrategy){
+        // unique_lock here instead of lock_guard because:
+        // 1. We need the lock to find and update the ticket (shared state)
+        // 2. But we can RELEASE it before payment processing (expensive I/O)
+        //    so other threads aren't blocked waiting during payment
+        // 3. Then re-acquire to erase from map
+        unique_lock<mutex> lock(operationMtx);
+
+        auto it = activeTickets.find(ticketId);
+        if(it == activeTickets.end()){
+            cout << "[Thread " << this_thread::get_id() << "] "
+                 << "Ticket " << ticketId << " not found!" << endl;
+            return;
+        }
+
+        shared_ptr<Ticket> ticket = it->second;
+        ticket->setExitTime(chrono::steady_clock::now());
+        long long minutes = ticket->getDurationMinutes();
+        double amount = rateStrategy ? rateStrategy->calculateRate(minutes) : 0.0;
+        ticket->setAmount(amount);
+        ticket->getSpot()->unpark();
+        ticket->setStatus(TicketStatus::PAID);
+
+        // Release lock BEFORE payment (I/O-heavy, don't block other threads)
+        lock.unlock();
+
+        // Payment happens outside the lock - other threads can park/unpark meanwhile
+        paymentStrategy->pay(amount);
+
+        // Re-acquire lock to modify shared state (erase from map)
+        lock.lock();
+        activeTickets.erase(ticketId);
+
+        cout << "[Thread " << this_thread::get_id() << "] "
+             << "Vehicle unparked. Ticket " << ticketId << " closed. Amount: $" << amount << endl;
+    }
+
+    int getActiveTicketCount(){
+        lock_guard<mutex> lock(operationMtx);
+        return activeTickets.size();
+    }
+};
+
+ParkingManager* ParkingManager::instance = nullptr;
+mutex ParkingManager::singletonMtx;
+
+#endif
+\end{lstlisting}
+
+% ============================================================
+\newpage
+\section{main.cpp}
+% ============================================================
+\begin{lstlisting}[title={\texttt{main.cpp}}]
+#include<iostream>
+#include<thread>
+#include<vector>
+#include "managers.hpp"
+using namespace std;
+
+
+int main()
+{
+    ParkingManager* manager = ParkingManager::getInstance();
+
+    // Rate strategies
+    HourlyRateStrategy hourlyRate(10.0);
+    FlatRateStrategy flatRate(50.0);
+
+    // Set initial rate strategy
+    manager->setRateStrategy(&hourlyRate);
+
+    // Create parking spots for floor 1
+    vector<ParkingSpot> floor1Spots = {
+        ParkingSpot("F1-S1", SpotType::SMALL),
+        ParkingSpot("F1-S2", SpotType::MEDIUM),
+        ParkingSpot("F1-S3", SpotType::MEDIUM),
+        ParkingSpot("F1-S4", SpotType::LARGE)
+    };
+    ParkingFloor floor1(1, floor1Spots);
+    manager->addFloor(floor1);
+
+    // Create parking spots for floor 2
+    vector<ParkingSpot> floor2Spots = {
+        ParkingSpot("F2-S1", SpotType::SMALL),
+        ParkingSpot("F2-S2", SpotType::SMALL),
+        ParkingSpot("F2-S3", SpotType::MEDIUM),
+        ParkingSpot("F2-S4", SpotType::MEDIUM),
+        ParkingSpot("F2-S5", SpotType::LARGE)
+    };
+    ParkingFloor floor2(2, floor2Spots);
+    manager->addFloor(floor2);
+
+    // ============================================================
+    // DEMO 1: Concurrent parking from multiple threads
+    // Without the lock_guard in parkVehicle, two threads could
+    // find the same spot free and both try to park there!
+    // ============================================================
+    cout << "=== DEMO 1: Concurrent Parking (lock_guard) ===" << endl;
+    cout << "Multiple threads trying to park vehicles simultaneously.\n"
+         << "lock_guard in parkVehicle ensures only one thread\n"
+         << "can find+claim a spot at a time (no double-parking).\n" << endl;
+
+    // Vehicles owned by main thread, passed as raw (non-owning) ptrs to parkVehicle
+    Vehicle bike1("BIKE-001", VehicleType::BIKE);
+    Vehicle bike2("BIKE-002", VehicleType::BIKE);
+    Vehicle car1("CAR-001", VehicleType::CAR);
+    Vehicle car2("CAR-002", VehicleType::CAR);
+    Vehicle car3("CAR-003", VehicleType::CAR);
+    Vehicle truck1("TRUCK-001", VehicleType::TRUCK);
+    Vehicle truck2("TRUCK-002", VehicleType::TRUCK);
+
+    // shared_ptr<Ticket>: returned from parkVehicle.
+    // Why shared_ptr? The ticket is stored in the manager's map AND
+    // we hold a reference here. Both owners -> shared ownership.
+    vector<shared_ptr<Ticket>> tickets(7);
+
+    // Spawn threads that concurrently try to park
+    vector<thread> parkThreads;
+    auto parkFn = [&](int idx, Vehicle* v){
+        tickets[idx] = manager->parkVehicle(v);
+    };
+
+    parkThreads.emplace_back(parkFn, 0, &bike1);
+    parkThreads.emplace_back(parkFn, 1, &bike2);
+    parkThreads.emplace_back(parkFn, 2, &car1);
+    parkThreads.emplace_back(parkFn, 3, &car2);
+    parkThreads.emplace_back(parkFn, 4, &car3);
+    parkThreads.emplace_back(parkFn, 5, &truck1);
+    parkThreads.emplace_back(parkFn, 6, &truck2);
+
+    for(auto& t : parkThreads) t.join();
+
+    cout << "\nActive tickets after concurrent parking: "
+         << manager->getActiveTicketCount() << endl;
+
+    // ============================================================
+    // DEMO 2: Concurrent unparking with unique_lock
+    // unique_lock lets us RELEASE the lock before payment I/O
+    // and RE-ACQUIRE it to erase from the map.
+    // This means other threads aren't blocked during payment.
+    // ============================================================
+    cout << "\n=== DEMO 2: Concurrent Unparking (unique_lock) ===" << endl;
+    cout << "unique_lock in unparkVehicle releases the lock before\n"
+         << "payment processing, so other threads can work meanwhile.\n"
+         << "Then re-acquires to safely erase from the map.\n" << endl;
+
+    // Using HourlyRate for first batch
+    CashPayment cashPayment;
+    CardPayment cardPayment;
+
+    vector<thread> unparkThreads;
+
+    // Unpark bike1 & car1 with HourlyRate + Cash (threads run concurrently)
+    for(int i : {0, 2}){
+        if(tickets[i]){
+            string tid = tickets[i]->getTicketId();
+            unparkThreads.emplace_back([&manager, tid, &cashPayment](){
+                manager->unparkVehicle(tid, &cashPayment);
+            });
+        }
+    }
+
+    // Switch to FlatRate mid-flight for the remaining vehicles
+    manager->setRateStrategy(&flatRate);
+
+    // Unpark car2 & truck1 with FlatRate + Card (threads run concurrently)
+    for(int i : {3, 5}){
+        if(tickets[i]){
+            string tid = tickets[i]->getTicketId();
+            unparkThreads.emplace_back([&manager, tid, &cardPayment](){
+                manager->unparkVehicle(tid, &cardPayment);
+            });
+        }
+    }
+
+    for(auto& t : unparkThreads) t.join();
+
+    cout << "\nActive tickets after concurrent unparking: "
+         << manager->getActiveTicketCount() << endl;
+
+    // ============================================================
+    // SUMMARY OF LOCK CHOICES IN THIS CODEBASE:
+    // ----------------------------------------------------------
+    // getInstance()     -> lock_guard  (simple scope, create-and-done)
+    // setRateStrategy() -> lock_guard  (simple one-liner write)
+    // addFloor()        -> lock_guard  (simple one-liner write)
+    // getActiveCount()  -> lock_guard  (simple one-liner read)
+    // parkVehicle()     -> lock_guard  (must hold lock entire time:
+    //                      find spot + park + create ticket is atomic)
+    // unparkVehicle()   -> unique_lock (need to unlock before payment
+    //                      I/O, then relock to erase from map)
+    // ============================================================
+
+    return 0;
+}
+\end{lstlisting}
+
+\end{document}

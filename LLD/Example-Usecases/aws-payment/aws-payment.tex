@@ -1,0 +1,801 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=0.8in]{geometry}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{titlesec}
+\usepackage{hyperref}
+\usepackage{fancyhdr}
+
+\definecolor{codebg}{RGB}{245,245,245}
+\definecolor{codegreen}{RGB}{0,128,0}
+\definecolor{codegray}{RGB}{128,128,128}
+\definecolor{codeblue}{RGB}{0,0,180}
+\definecolor{codepurple}{RGB}{128,0,128}
+
+\lstset{
+    language=C++,
+    backgroundcolor=\color{codebg},
+    basicstyle=\ttfamily\footnotesize,
+    keywordstyle=\color{codeblue}\bfseries,
+    commentstyle=\color{codegreen}\itshape,
+    stringstyle=\color{codepurple},
+    numberstyle=\tiny\color{codegray},
+    numbers=left,
+    numbersep=5pt,
+    frame=single,
+    breaklines=true,
+    breakatwhitespace=false,
+    tabsize=4,
+    showstringspaces=false,
+    captionpos=b,
+    morekeywords={override,nullptr,string,shared_ptr,unique_ptr,make_shared,make_unique,
+                  lock_guard,unique_lock,mutex,thread,vector,unordered_map,map,
+                  chrono,steady_clock,time_point,atomic},
+}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\textbf{LLD --- AWS Payment}}
+\fancyhead[R]{\thepage}
+
+\title{\Huge\textbf{AWS Payment Processing}\\[0.3em]\Large Low-Level Design --- C++ Concurrency}
+\author{LLD Interview Preparation}
+\date{}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+% ============================================================
+\section{File Structure}
+% ============================================================
+\begin{verbatim}
+aws-payment/
+  models.hpp       -- PaymentStatus, PaymentMethod, Wallet (walletMtx),
+                      PaymentOrder, PaymentEvent
+  strategies.hpp   -- PaymentProcessorStrategy, PaymentValidator (Chain),
+                      PaymentObserver
+  managers.hpp     -- PaymentService (Singleton)
+  main.cpp         -- Demo: multiple payment methods, validation,
+                      concurrent payments
+\end{verbatim}
+
+\textbf{Compilation:}
+\begin{verbatim}
+g++ -std=c++17 -pthread -o aws_payment.exe main.cpp
+\end{verbatim}
+
+\subsection{Concurrency Summary}
+\begin{itemize}
+    \item \textbf{Level 1:} \texttt{serviceMtx} (PaymentService) --- events, wallets, observers
+    \item \textbf{Level 2:} \texttt{walletMtx} (per-Wallet) --- atomic balance check/modify
+    \item Released before PSP call (expensive external I/O)
+    \item Snapshot pattern for observer notifications
+    \item Validator chain immutable after setup --- no lock needed
+\end{itemize}
+
+\subsection{Design Patterns}
+\begin{itemize}
+    \item \textbf{Singleton:} PaymentService
+    \item \textbf{Strategy:} CreditCardProcessor, UPIProcessor, WalletProcessor
+    \item \textbf{Chain of Responsibility:} AmountValidator, FraudValidator
+    \item \textbf{Observer:} AuditObserver, EmailObserver
+\end{itemize}
+
+\subsection{Smart Pointers}
+\begin{itemize}
+    \item \texttt{shared\_ptr<Wallet>} --- service map + WalletProcessor
+    \item \texttt{shared\_ptr<PaymentEvent>} --- service map + caller
+    \item \texttt{shared\_ptr<PaymentObserver>} --- service vector + caller
+    \item \texttt{shared\_ptr<PaymentValidator>} --- chain links
+    \item \texttt{shared\_ptr<PaymentProcessorStrategy>} --- caller creates, passes to service
+\end{itemize}
+
+% ============================================================
+\newpage
+\section{models.hpp}
+% ============================================================
+\begin{lstlisting}[title={\texttt{models.hpp}}]
+#ifndef MODELS_HPP
+#define MODELS_HPP
+
+#include <string>
+#include <vector>
+#include <chrono>
+#include <iostream>
+#include <algorithm>
+#include <mutex>
+#include <memory>
+using namespace std;
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+enum class PaymentStatus {
+    PENDING,
+    PROCESSING,
+    SUCCESS,
+    FAILED,
+    REFUNDED
+};
+
+enum class PaymentMethod {
+    CREDIT_CARD,
+    DEBIT_CARD,
+    UPI,
+    WALLET,
+    NET_BANKING
+};
+
+inline string statusToString(PaymentStatus s) {
+    switch (s) {
+        case PaymentStatus::PENDING:    return "PENDING";
+        case PaymentStatus::PROCESSING: return "PROCESSING";
+        case PaymentStatus::SUCCESS:    return "SUCCESS";
+        case PaymentStatus::FAILED:     return "FAILED";
+        case PaymentStatus::REFUNDED:   return "REFUNDED";
+        default: return "UNKNOWN";
+    }
+}
+
+inline string methodToString(PaymentMethod m) {
+    switch (m) {
+        case PaymentMethod::CREDIT_CARD:  return "CREDIT_CARD";
+        case PaymentMethod::DEBIT_CARD:   return "DEBIT_CARD";
+        case PaymentMethod::UPI:          return "UPI";
+        case PaymentMethod::WALLET:       return "WALLET";
+        case PaymentMethod::NET_BANKING:  return "NET_BANKING";
+        default: return "UNKNOWN";
+    }
+}
+
+// ============================================================
+// WALLET
+// Has its own mutex: multiple threads can debit/credit
+// the same wallet concurrently (e.g., seller wallet receiving
+// credits from different payment events simultaneously).
+// PESSIMISTIC: lock before any balance check/modify.
+// ============================================================
+
+class Wallet {
+    string ownerId;
+    double balance;
+    vector<string> history;
+    mutable mutex walletMtx;
+
+public:
+    Wallet(const string& owner, double initial = 0.0)
+        : ownerId(owner), balance(initial) {}
+
+    string getOwnerId() const { return ownerId; }
+
+    double getBalance() {
+        lock_guard<mutex> lock(walletMtx);
+        return balance;
+    }
+
+    bool credit(double amount, const string& txnId) {
+        lock_guard<mutex> lock(walletMtx);
+        if (amount <= 0) return false;
+        balance += amount;
+        history.push_back("CREDIT: $" + to_string(amount) + " [" + txnId + "]");
+        return true;
+    }
+
+    bool debit(double amount, const string& txnId) {
+        // PESSIMISTIC: lock, check balance, debit -- all atomic
+        lock_guard<mutex> lock(walletMtx);
+        if (amount <= 0 || balance < amount) return false;
+        balance -= amount;
+        history.push_back("DEBIT: $" + to_string(amount) + " [" + txnId + "]");
+        return true;
+    }
+
+    void display() {
+        lock_guard<mutex> lock(walletMtx);
+        cout << "  Wallet[" << ownerId << "] Balance: $" << balance << endl;
+        int start = max(0, (int)history.size() - 5);
+        for (int i = start; i < (int)history.size(); i++) {
+            cout << "    " << history[i] << endl;
+        }
+    }
+};
+
+// ============================================================
+// PAYMENT ORDER
+// Represents a single order within a payment event.
+// No mutex needed: owned by a single PaymentEvent, modified
+// only under the service-level lock.
+// ============================================================
+
+class PaymentOrder {
+    string orderId;
+    string sellerId;
+    double amount;
+    PaymentStatus status;
+
+public:
+    PaymentOrder(const string& orderId, const string& sellerId, double amount)
+        : orderId(orderId), sellerId(sellerId), amount(amount),
+          status(PaymentStatus::PENDING) {}
+
+    string getOrderId() const { return orderId; }
+    string getSellerId() const { return sellerId; }
+    double getAmount() const { return amount; }
+    PaymentStatus getStatus() const { return status; }
+    void setStatus(PaymentStatus s) { status = s; }
+
+    void display() const {
+        cout << "    Order[" << orderId << "] Seller: " << sellerId
+             << " $" << amount << " " << statusToString(status) << endl;
+    }
+};
+
+// ============================================================
+// PAYMENT EVENT
+// Groups multiple orders into one payment transaction.
+// shared_ptr<PaymentOrder>: event owns orders, but orders are
+// also passed to observers for notification. Shared ownership.
+// ============================================================
+
+class PaymentEvent {
+    string eventId;
+    string userId;
+    vector<shared_ptr<PaymentOrder>> orders;
+    PaymentMethod method;
+    PaymentStatus status;
+
+public:
+    PaymentEvent(const string& id, const string& userId, PaymentMethod method)
+        : eventId(id), userId(userId), method(method),
+          status(PaymentStatus::PENDING) {}
+
+    void addOrder(shared_ptr<PaymentOrder> order) { orders.push_back(order); }
+
+    string getEventId() const { return eventId; }
+    string getUserId() const { return userId; }
+    PaymentMethod getMethod() const { return method; }
+    PaymentStatus getStatus() const { return status; }
+    void setStatus(PaymentStatus s) { status = s; }
+    const vector<shared_ptr<PaymentOrder>>& getOrders() const { return orders; }
+
+    double getTotalAmount() const {
+        double total = 0;
+        for (const auto& o : orders) total += o->getAmount();
+        return total;
+    }
+
+    void display() const {
+        cout << "  Event[" << eventId << "] User: " << userId
+             << " Method: " << methodToString(method)
+             << " Total: $" << getTotalAmount()
+             << " Status: " << statusToString(status) << endl;
+        for (const auto& o : orders) o->display();
+    }
+};
+
+#endif
+\end{lstlisting}
+
+% ============================================================
+\newpage
+\section{strategies.hpp}
+% ============================================================
+\begin{lstlisting}[title={\texttt{strategies.hpp}}]
+#ifndef STRATEGIES_HPP
+#define STRATEGIES_HPP
+
+#include "models.hpp"
+#include <memory>
+#include <iostream>
+using namespace std;
+
+// ============================================================
+// STRATEGY PATTERN: Payment Processor
+// unique_ptr<PaymentProcessorStrategy> when only one owner,
+// shared_ptr when passed to processPayment (service + caller).
+// ============================================================
+
+class PaymentProcessorStrategy {
+public:
+    virtual ~PaymentProcessorStrategy() = default;
+    virtual bool processPayment(shared_ptr<PaymentEvent> event, double amount) = 0;
+    virtual string getName() const = 0;
+};
+
+class CreditCardProcessor : public PaymentProcessorStrategy {
+    string cardNumber;
+public:
+    CreditCardProcessor(const string& card) : cardNumber(card) {}
+
+    bool processPayment(shared_ptr<PaymentEvent> event, double amount) override {
+        cout << "    [CreditCard] Processing $" << amount
+             << " on card ****" << cardNumber.substr(cardNumber.length() - 4) << endl;
+        // Simulate external PSP call (90% success)
+        bool success = (rand() % 10) < 9;
+        cout << "    [CreditCard] " << (success ? "OK" : "DECLINED") << endl;
+        return success;
+    }
+    string getName() const override { return "CreditCard"; }
+};
+
+class UPIProcessor : public PaymentProcessorStrategy {
+    string upiId;
+public:
+    UPIProcessor(const string& upi) : upiId(upi) {}
+
+    bool processPayment(shared_ptr<PaymentEvent> event, double amount) override {
+        cout << "    [UPI] Processing $" << amount << " via " << upiId << endl;
+        bool success = (rand() % 10) < 9;
+        cout << "    [UPI] " << (success ? "OK" : "TIMEOUT") << endl;
+        return success;
+    }
+    string getName() const override { return "UPI"; }
+};
+
+class WalletProcessor : public PaymentProcessorStrategy {
+    shared_ptr<Wallet> wallet;  // shared_ptr: wallet also lives in service's map
+public:
+    WalletProcessor(shared_ptr<Wallet> w) : wallet(w) {}
+
+    bool processPayment(shared_ptr<PaymentEvent> event, double amount) override {
+        cout << "    [Wallet] Processing $" << amount
+             << " (Balance: $" << wallet->getBalance() << ")" << endl;
+        // Wallet::debit is thread-safe (has its own mutex)
+        bool success = wallet->debit(amount, event->getEventId());
+        cout << "    [Wallet] " << (success ? "OK" : "INSUFFICIENT BALANCE") << endl;
+        return success;
+    }
+    string getName() const override { return "Wallet"; }
+};
+
+// ============================================================
+// CHAIN OF RESPONSIBILITY: Payment Validation
+// shared_ptr<PaymentValidator>: validators are chained via
+// shared_ptr links. Service holds the head of the chain.
+// ============================================================
+
+class PaymentValidator {
+protected:
+    shared_ptr<PaymentValidator> next;
+public:
+    virtual ~PaymentValidator() = default;
+    void setNext(shared_ptr<PaymentValidator> n) { next = n; }
+
+    virtual bool validate(shared_ptr<PaymentEvent> event) {
+        if (next) return next->validate(event);
+        return true;
+    }
+};
+
+class AmountValidator : public PaymentValidator {
+    double maxAmount;
+public:
+    AmountValidator(double max) : maxAmount(max) {}
+
+    bool validate(shared_ptr<PaymentEvent> event) override {
+        double total = event->getTotalAmount();
+        if (total <= 0 || total > maxAmount) {
+            cout << "    [Validate] FAIL: amount $" << total
+                 << " (max $" << maxAmount << ")" << endl;
+            return false;
+        }
+        cout << "    [Validate] OK: amount" << endl;
+        return PaymentValidator::validate(event);
+    }
+};
+
+class FraudValidator : public PaymentValidator {
+public:
+    bool validate(shared_ptr<PaymentEvent> event) override {
+        bool fraud = (rand() % 100) < 5;  // 5% fraud rate
+        if (fraud) {
+            cout << "    [Validate] FAIL: fraud detected" << endl;
+            return false;
+        }
+        cout << "    [Validate] OK: fraud check" << endl;
+        return PaymentValidator::validate(event);
+    }
+};
+
+// ============================================================
+// OBSERVER PATTERN: Payment Notifications
+// shared_ptr<PaymentObserver>: shared between service's vector
+// and caller (who may want to remove it later).
+// ============================================================
+
+class PaymentObserver {
+public:
+    virtual ~PaymentObserver() = default;
+    virtual void onSuccess(shared_ptr<PaymentEvent> event) = 0;
+    virtual void onFailure(shared_ptr<PaymentEvent> event, const string& reason) = 0;
+    virtual string getName() const = 0;
+};
+
+class AuditObserver : public PaymentObserver {
+public:
+    void onSuccess(shared_ptr<PaymentEvent> event) override {
+        cout << "    [Audit] SUCCESS: " << event->getEventId()
+             << " $" << event->getTotalAmount() << endl;
+    }
+    void onFailure(shared_ptr<PaymentEvent> event, const string& reason) override {
+        cout << "    [Audit] FAILED: " << event->getEventId()
+             << " reason: " << reason << endl;
+    }
+    string getName() const override { return "Audit"; }
+};
+
+class EmailObserver : public PaymentObserver {
+    string email;
+public:
+    EmailObserver(const string& e) : email(e) {}
+
+    void onSuccess(shared_ptr<PaymentEvent> event) override {
+        cout << "    [Email -> " << email << "] Payment "
+             << event->getEventId() << " succeeded ($"
+             << event->getTotalAmount() << ")" << endl;
+    }
+    void onFailure(shared_ptr<PaymentEvent> event, const string& reason) override {
+        cout << "    [Email -> " << email << "] Payment "
+             << event->getEventId() << " failed: " << reason << endl;
+    }
+    string getName() const override { return "Email(" + email + ")"; }
+};
+
+#endif
+\end{lstlisting}
+
+% ============================================================
+\newpage
+\section{managers.hpp}
+% ============================================================
+\begin{lstlisting}[title={\texttt{managers.hpp}}]
+#ifndef MANAGERS_HPP
+#define MANAGERS_HPP
+
+#include "strategies.hpp"
+#include <map>
+#include <mutex>
+#include <thread>
+using namespace std;
+
+// ============================================================
+// LOCKING STRATEGY: PESSIMISTIC (local locks, single server)
+// ----------------------------------------------------------
+// Level 1: serviceMtx (PaymentService)
+//   -> protects paymentEvents map, wallet maps, observers vector
+//   -> lock_guard for simple reads/writes
+//   -> unique_lock in processPayment (release before PSP call
+//      and notification -- both are expensive external I/O)
+//
+// Level 2: walletMtx (per-Wallet)
+//   -> protects individual wallet balance
+//   -> lock_guard inside debit/credit (atomic check-and-modify)
+//   -> Multiple concurrent payments can credit DIFFERENT seller
+//      wallets in parallel (no contention)
+//
+// WHY PESSIMISTIC?
+//   Payments involve money -- we can't afford lost updates or
+//   double-charges. Lock first, validate, process, commit.
+//   Optimistic locking could cause a charge to succeed at PSP
+//   but fail the local commit (version mismatch) -- messy refund.
+//
+// DEADLOCK PREVENTION:
+//   - Always Level 1 before Level 2
+//   - Release Level 1 before PSP call and notification
+//   - notifyObservers takes snapshot under lock, notifies outside
+//
+// SMART POINTERS:
+//   shared_ptr<Wallet>        -> service map + WalletProcessor both hold ref
+//   shared_ptr<PaymentEvent>  -> service map + caller both hold ref
+//   shared_ptr<PaymentObserver> -> service vector + caller (to remove later)
+//   shared_ptr<PaymentValidator> -> chain of responsibility links
+//   shared_ptr<PaymentProcessorStrategy> -> caller creates, passes to service
+// ============================================================
+
+class PaymentService {
+    static mutex singletonMtx;
+    mutable mutex serviceMtx;
+
+    map<string, shared_ptr<PaymentEvent>> events;
+    map<string, shared_ptr<Wallet>> userWallets;
+    map<string, shared_ptr<Wallet>> sellerWallets;
+    vector<shared_ptr<PaymentObserver>> observers;
+    shared_ptr<PaymentValidator> validatorChain;
+
+    PaymentService() {
+        auto amountVal = make_shared<AmountValidator>(10000.0);
+        auto fraudVal = make_shared<FraudValidator>();
+        amountVal->setNext(fraudVal);
+        validatorChain = amountVal;
+    }
+
+    // Notify OUTSIDE serviceMtx (snapshot pattern, avoids deadlock)
+    void notifySuccess(shared_ptr<PaymentEvent> event) {
+        vector<shared_ptr<PaymentObserver>> snap;
+        { lock_guard<mutex> lock(serviceMtx); snap = observers; }
+        for (auto& obs : snap) obs->onSuccess(event);
+    }
+
+    void notifyFailure(shared_ptr<PaymentEvent> event, const string& reason) {
+        vector<shared_ptr<PaymentObserver>> snap;
+        { lock_guard<mutex> lock(serviceMtx); snap = observers; }
+        for (auto& obs : snap) obs->onFailure(event, reason);
+    }
+
+public:
+    static PaymentService* getInstance() {
+        lock_guard<mutex> lock(singletonMtx);
+        static PaymentService instance;
+        return &instance;
+    }
+
+    // --- Observer management (lock_guard: simple scope) ---
+    void addObserver(shared_ptr<PaymentObserver> obs) {
+        lock_guard<mutex> lock(serviceMtx);
+        observers.push_back(obs);
+        cout << "[PaymentService] Observer added: " << obs->getName() << endl;
+    }
+
+    // --- Wallet management (lock_guard: simple scope) ---
+    void createWallet(const string& owner, double balance, bool isSeller = false) {
+        lock_guard<mutex> lock(serviceMtx);
+        auto w = make_shared<Wallet>(owner, balance);
+        (isSeller ? sellerWallets : userWallets)[owner] = w;
+        cout << "[PaymentService] " << (isSeller ? "Seller" : "User")
+             << " wallet created: " << owner << " ($" << balance << ")" << endl;
+    }
+
+    shared_ptr<Wallet> getWallet(const string& owner, bool isSeller = false) {
+        lock_guard<mutex> lock(serviceMtx);
+        auto& m = isSeller ? sellerWallets : userWallets;
+        auto it = m.find(owner);
+        return (it != m.end()) ? it->second : nullptr;
+    }
+
+    // --- Core: Process Payment ---
+    // unique_lock: we release serviceMtx before the PSP call (external I/O)
+    // and before notifications. This lets other threads process payments
+    // to different sellers in parallel.
+    bool processPayment(shared_ptr<PaymentEvent> event,
+                        shared_ptr<PaymentProcessorStrategy> processor) {
+
+        cout << "\n=== Processing " << event->getEventId() << " ===" << endl;
+        event->display();
+
+        // Step 1: Store event under lock
+        {
+            lock_guard<mutex> lock(serviceMtx);
+            events[event->getEventId()] = event;
+            event->setStatus(PaymentStatus::PROCESSING);
+        }
+
+        // Step 2: Validate (validator chain is immutable after setup, no lock needed)
+        cout << "  [Validation]" << endl;
+        if (!validatorChain->validate(event)) {
+            event->setStatus(PaymentStatus::FAILED);
+            notifyFailure(event, "Validation failed");
+            return false;
+        }
+
+        // Step 3: Call external PSP -- NO lock held (expensive I/O)
+        // This is WHY we use unique_lock pattern: release before I/O
+        // so other threads aren't blocked during network calls.
+        cout << "  [PSP Call]" << endl;
+        double total = event->getTotalAmount();
+        bool pspOk = processor->processPayment(event, total);
+
+        if (!pspOk) {
+            event->setStatus(PaymentStatus::FAILED);
+            for (auto& o : event->getOrders()) o->setStatus(PaymentStatus::FAILED);
+            notifyFailure(event, "PSP declined");
+            return false;
+        }
+
+        // Step 4: Credit seller wallets
+        // Each wallet has its own lock (Level 2). No serviceMtx needed.
+        // Concurrent payments to DIFFERENT sellers proceed in parallel.
+        cout << "  [Wallet Credits]" << endl;
+        for (auto& order : event->getOrders()) {
+            auto sellerWallet = getWallet(order->getSellerId(), true);
+            if (sellerWallet) {
+                sellerWallet->credit(order->getAmount(), order->getOrderId());
+                order->setStatus(PaymentStatus::SUCCESS);
+                cout << "    Credited $" << order->getAmount()
+                     << " to " << order->getSellerId() << endl;
+            } else {
+                order->setStatus(PaymentStatus::FAILED);
+                cout << "    Seller wallet not found: " << order->getSellerId() << endl;
+            }
+        }
+
+        event->setStatus(PaymentStatus::SUCCESS);
+
+        // Step 5: Notify outside lock (snapshot pattern)
+        cout << "  [Notifications]" << endl;
+        notifySuccess(event);
+
+        cout << "=== " << event->getEventId() << " Complete ===" << endl;
+        return true;
+    }
+
+    // --- Query operations ---
+    void viewEvent(const string& id) {
+        lock_guard<mutex> lock(serviceMtx);
+        auto it = events.find(id);
+        if (it != events.end()) it->second->display();
+        else cout << "Event not found: " << id << endl;
+    }
+
+    void viewWallet(const string& owner, bool isSeller = false) {
+        auto w = getWallet(owner, isSeller);
+        if (w) w->display();
+        else cout << "Wallet not found: " << owner << endl;
+    }
+
+    void listAllEvents() {
+        lock_guard<mutex> lock(serviceMtx);
+        cout << "\n=== All Payment Events ===" << endl;
+        for (auto& [id, ev] : events) {
+            ev->display();
+            cout << "  ---" << endl;
+        }
+    }
+
+    PaymentService(const PaymentService&) = delete;
+    PaymentService& operator=(const PaymentService&) = delete;
+};
+
+mutex PaymentService::singletonMtx;
+
+#endif
+\end{lstlisting}
+
+% ============================================================
+\newpage
+\section{main.cpp}
+% ============================================================
+\begin{lstlisting}[title={\texttt{main.cpp}}]
+#include <iostream>
+#include <thread>
+#include <vector>
+#include "managers.hpp"
+using namespace std;
+
+int main() {
+    srand(42);  // fixed seed for reproducible demo
+    auto* svc = PaymentService::getInstance();
+
+    cout << "=== Payment Processing System ===" << endl << endl;
+
+    // ========== 1. OBSERVER SETUP ==========
+    // shared_ptr<Observer>: shared between caller (to remove later)
+    // and service's observer vector. Both owners -> shared_ptr.
+    auto auditObs = make_shared<AuditObserver>();
+    auto emailObs = make_shared<EmailObserver>("user@example.com");
+    svc->addObserver(auditObs);
+    svc->addObserver(emailObs);
+
+    // ========== 2. WALLET SETUP ==========
+    // shared_ptr<Wallet>: stored in service map AND passed to
+    // WalletProcessor. Both need it alive -> shared_ptr.
+    // Each Wallet has its own mutex for thread-safe debit/credit.
+    cout << "\n--- Wallets ---" << endl;
+    svc->createWallet("UserA", 500.0);
+    svc->createWallet("UserB", 300.0);
+    svc->createWallet("UserC", 150.0);
+    svc->createWallet("SellerA", 0.0, true);
+    svc->createWallet("SellerB", 0.0, true);
+
+    // ========== 3. STRATEGY PATTERN: Different payment methods ==========
+    cout << "\n--- Payment 1: Credit Card ---" << endl;
+    {
+        auto event = make_shared<PaymentEvent>("PAY_001", "UserA", PaymentMethod::CREDIT_CARD);
+        event->addOrder(make_shared<PaymentOrder>("ORD_001", "SellerA", 100.0));
+        event->addOrder(make_shared<PaymentOrder>("ORD_002", "SellerB", 50.0));
+        auto proc = make_shared<CreditCardProcessor>("1234567890123456");
+        svc->processPayment(event, proc);
+    }
+
+    cout << "\n--- Payment 2: UPI ---" << endl;
+    {
+        auto event = make_shared<PaymentEvent>("PAY_002", "UserB", PaymentMethod::UPI);
+        event->addOrder(make_shared<PaymentOrder>("ORD_003", "SellerA", 75.0));
+        auto proc = make_shared<UPIProcessor>("user@paytm");
+        svc->processPayment(event, proc);
+    }
+
+    cout << "\n--- Payment 3: Wallet ---" << endl;
+    {
+        auto wallet = svc->getWallet("UserA");
+        auto event = make_shared<PaymentEvent>("PAY_003", "UserA", PaymentMethod::WALLET);
+        event->addOrder(make_shared<PaymentOrder>("ORD_004", "SellerB", 80.0));
+        auto proc = make_shared<WalletProcessor>(wallet);
+        svc->processPayment(event, proc);
+    }
+
+    // ========== 4. CHAIN OF RESPONSIBILITY: Validation failure ==========
+    cout << "\n--- Payment 4: Amount too high (should fail validation) ---" << endl;
+    {
+        auto event = make_shared<PaymentEvent>("PAY_004", "UserC", PaymentMethod::CREDIT_CARD);
+        event->addOrder(make_shared<PaymentOrder>("ORD_005", "SellerA", 15000.0));
+        auto proc = make_shared<CreditCardProcessor>("9876543210987654");
+        svc->processPayment(event, proc);
+    }
+
+    // ============================================================
+    // 5. CONCURRENT PAYMENTS
+    // ----------------------------------------------------------
+    // PESSIMISTIC LOCKING IN ACTION:
+    // - processPayment acquires serviceMtx briefly to store event
+    // - Releases lock before PSP call (expensive external I/O)
+    //   so other threads aren't blocked during network calls
+    // - Wallet credits use per-wallet locks (Level 2)
+    //   so payments to DIFFERENT sellers proceed in parallel
+    // - Notifications use snapshot pattern (copy observers under
+    //   lock, notify outside) to prevent deadlock
+    // ============================================================
+    cout << "\n\n--- Concurrent Payments (3 threads) ---" << endl;
+    cout << "All three wallet payments hit at once." << endl;
+    cout << "Per-wallet locks prevent double-debit." << endl;
+    cout << "Seller wallet credits proceed in parallel." << endl << endl;
+
+    vector<thread> threads;
+
+    auto payFn = [&](const string& eventId, const string& userId,
+                     const string& sellerId, double amount) {
+        auto wallet = svc->getWallet(userId);
+        if (!wallet) return;
+        auto event = make_shared<PaymentEvent>(eventId, userId, PaymentMethod::WALLET);
+        event->addOrder(make_shared<PaymentOrder>(eventId + "_ord", sellerId, amount));
+        auto proc = make_shared<WalletProcessor>(wallet);
+        svc->processPayment(event, proc);
+    };
+
+    threads.emplace_back(payFn, "CONC_001", "UserA", "SellerA", 50.0);
+    threads.emplace_back(payFn, "CONC_002", "UserB", "SellerB", 75.0);
+    threads.emplace_back(payFn, "CONC_003", "UserC", "SellerA", 100.0);
+
+    for (auto& t : threads) t.join();
+
+    // ========== 6. VIEW RESULTS ==========
+    cout << "\n\n--- Final Wallet Balances ---" << endl;
+    svc->viewWallet("UserA");
+    svc->viewWallet("UserB");
+    svc->viewWallet("UserC");
+    cout << endl;
+    svc->viewWallet("SellerA", true);
+    svc->viewWallet("SellerB", true);
+
+    svc->listAllEvents();
+
+    // ============================================================
+    // CONCURRENCY SUMMARY:
+    // ----------------------------------------------------------
+    // Level 1: serviceMtx (PaymentService)
+    //   - lock_guard: wallet create, observer add, event store, queries
+    //   - Released before PSP call and notifications
+    //
+    // Level 2: walletMtx (per-Wallet)
+    //   - lock_guard: atomic balance check + modify
+    //   - Different wallets lock independently (parallel credits)
+    //
+    // DEADLOCK PREVENTION:
+    //   - Always Level 1 before Level 2 (never reverse)
+    //   - Release Level 1 before notifications (snapshot pattern)
+    //   - Validator chain is immutable after init (no lock needed)
+    //
+    // WHY PESSIMISTIC?
+    //   Money is involved. Can't afford lost updates or double-charge.
+    //   Lock first, validate, process, commit. Simple and correct.
+    // ============================================================
+
+    cout << "\n=== Done ===" << endl;
+    return 0;
+}
+\end{lstlisting}
+
+\end{document}

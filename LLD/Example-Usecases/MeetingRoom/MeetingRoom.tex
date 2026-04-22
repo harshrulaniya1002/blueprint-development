@@ -1,0 +1,891 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=0.8in]{geometry}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{titlesec}
+\usepackage{hyperref}
+\usepackage{fancyhdr}
+
+\definecolor{codebg}{RGB}{245,245,245}
+\definecolor{codegreen}{RGB}{0,128,0}
+\definecolor{codegray}{RGB}{128,128,128}
+\definecolor{codeblue}{RGB}{0,0,180}
+\definecolor{codepurple}{RGB}{128,0,128}
+
+\lstset{
+    language=C++,
+    backgroundcolor=\color{codebg},
+    basicstyle=\ttfamily\footnotesize,
+    keywordstyle=\color{codeblue}\bfseries,
+    commentstyle=\color{codegreen}\itshape,
+    stringstyle=\color{codepurple},
+    numberstyle=\tiny\color{codegray},
+    numbers=left,
+    numbersep=5pt,
+    frame=single,
+    breaklines=true,
+    breakatwhitespace=false,
+    tabsize=4,
+    showstringspaces=false,
+    captionpos=b,
+    morekeywords={override,nullptr,string,shared_ptr,unique_ptr,make_shared,make_unique,
+                  lock_guard,unique_lock,mutex,thread,vector,unordered_map,map,
+                  chrono,steady_clock,time_point,atomic},
+}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\textbf{LLD --- Meeting Room}}
+\fancyhead[R]{\thepage}
+
+\title{\Huge\textbf{Meeting Room Booking}\\[0.3em]\Large Low-Level Design --- C++ Concurrency}
+\author{LLD Interview Preparation}
+\date{}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+% ============================================================
+\section{File Structure}
+% ============================================================
+\begin{verbatim}
+MeetingRoom/
+  models.hpp       -- Interval, Meeting, Room, BookingPolicy, Observers
+  managers.hpp     -- MeetingMgr (Singleton, header)
+  managers.cpp     -- MeetingMgr (implementation)
+  main.cpp         -- Demo: policies, concurrent booking, cancellation
+\end{verbatim}
+
+\textbf{Compilation:}
+\begin{verbatim}
+g++ -std=c++17 -pthread -o meeting_room.exe main.cpp managers.cpp
+\end{verbatim}
+
+\subsection{Concurrency Summary}
+\begin{itemize}
+    \item \textbf{Level 1:} \texttt{operationMtx} (MeetingMgr) --- rooms map, policy, observers
+    \item \textbf{Level 2:} \texttt{roomMtx} (per-Room) --- room calendar
+    \item \textbf{lock\_guard:} \texttt{addRoom}, \texttt{setPolicy}, \texttt{addObserver}, \texttt{listAllRooms}
+    \item \textbf{unique\_lock:} \texttt{bookRoom} (release before room-level lock)
+    \item \textbf{Snapshot pattern:} observers notified outside lock
+\end{itemize}
+
+\subsection{Design Patterns}
+\begin{itemize}
+    \item \textbf{Singleton:} MeetingMgr
+    \item \textbf{Strategy:} BookingPolicy (Standard, MaxDuration, AdvanceBooking)
+    \item \textbf{Observer:} EmailNotifier, SlackNotifier, SMSNotifier
+\end{itemize}
+
+\subsection{Smart Pointers}
+\begin{itemize}
+    \item \texttt{shared\_ptr<Room>} --- map + booking threads hold ref
+    \item \texttt{unique\_ptr<BookingPolicy>} --- manager sole owner
+    \item \texttt{shared\_ptr<NotificationObserver>} --- manager + caller
+\end{itemize}
+
+% ============================================================
+\newpage
+\section{models.hpp}
+% ============================================================
+\begin{lstlisting}[title={\texttt{models.hpp}}]
+#ifndef MODELS_HPP
+#define MODELS_HPP
+#include<iostream> 
+#include<vector>
+#include<mutex>
+#include<algorithm>
+#include<string>
+using namespace std;
+
+
+class Interval {
+    public:
+    int startTime;
+    int endTime;
+
+    Interval(int start, int end) : startTime(start), endTime(end) {
+        if(start >= end){
+            throw invalid_argument("Start time must be before end Time");
+        }
+    }
+
+    bool overlaps(const Interval& other) const {
+        return this->startTime < other.endTime && other.startTime < this->endTime;
+    }
+};
+
+class Meeting {
+    public:
+    string id;
+    Interval interval;
+    string userId;
+
+    Meeting(const string& id, const Interval& interval, const string& userId) 
+       : id(id), interval(interval), userId(userId) {}
+
+};
+
+
+//handles its own concurrency
+class Room{
+    string id;
+    int capacity;
+    vector<Meeting> calender;
+    mutable mutex roomMtx;
+
+    public:
+
+    Room(const string& id, const int& capacity)
+       : id(id), capacity(capacity) {}
+
+    string getId() const {return id;}   
+    int getCapacity() const {return capacity;}
+
+    bool book(const string& meetingId, const Interval& interval, const string& userId){
+        // 1. Lock this specific room
+        lock_guard<mutex> lock(roomMtx);
+
+        // 2. Critical Section: Check for overlaps
+        for(const auto& meeting : calender){
+            if(meeting.interval.overlaps(interval)){
+                return false; //conflict found
+            }
+        }
+
+        // 3. No conflict: Add meeting
+        calender.emplace_back(meetingId, interval, userId);
+        return true;
+        // 4. Lock automatically releases here
+    }
+    
+    bool cancelBooking(const string& meetingId) {
+        lock_guard<mutex> lock(roomMtx);
+        
+        auto it = find_if(calender.begin(), calender.end(),
+            [&meetingId](const Meeting& m) { return m.id == meetingId; });
+        
+        if (it != calender.end()) {
+            calender.erase(it);
+            return true;
+        }
+        return false;
+    }
+    
+    bool isAvailable(int start, int end) const {
+        lock_guard<mutex> lock(roomMtx);
+        Interval requestedInterval(start, end);
+        
+        for (const auto& meeting : calender) {
+            if (meeting.interval.overlaps(requestedInterval)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    
+    void displayBookings() const {
+        lock_guard<mutex> lock(roomMtx);
+        cout << "Room " << id << " (Capacity: " << capacity << ") Bookings:\n";
+        
+        if (calender.empty()) {
+            cout << "  No bookings.\n";
+        } else {
+            for (const auto& meeting : calender) {
+                cout << "  [" << meeting.interval.startTime << "-" 
+                     << meeting.interval.endTime << "] " 
+                     << meeting.userId << " (ID: " << meeting.id << ")\n";
+            }
+        }
+    }
+    
+    int getBookingCount() const {
+        lock_guard<mutex> lock(roomMtx);
+        return calender.size();
+    }
+};
+
+
+// ========== STRATEGY PATTERN ==========
+// Defines different booking policies
+
+class BookingPolicy {
+public:
+    virtual ~BookingPolicy() = default;
+    virtual bool canBook(const Room* room, const Interval& interval, const string& userId) const = 0;
+    virtual string getPolicyName() const = 0;
+};
+
+class StandardBookingPolicy : public BookingPolicy {
+public:
+    bool canBook(const Room* room, const Interval& interval, const string& userId) const override {
+        return true;  // Anyone can book
+    }
+    
+    string getPolicyName() const override {
+        return "Standard (No restrictions)";
+    }
+};
+
+class MaxDurationPolicy : public BookingPolicy {
+    int maxDuration;
+public:
+    MaxDurationPolicy(int maxHours) : maxDuration(maxHours) {}
+    
+    bool canBook(const Room* room, const Interval& interval, const string& userId) const override {
+        int duration = interval.endTime - interval.startTime;
+        if (duration > maxDuration) {
+            cout << "Policy Violation: Max booking duration is " << maxDuration << " hours.\n";
+            return false;
+        }
+        return true;
+    }
+    
+    string getPolicyName() const override {
+        return "Max Duration (" + to_string(maxDuration) + " hours)";
+    }
+};
+
+class AdvanceBookingPolicy : public BookingPolicy {
+    int minAdvanceHours;
+public:
+    AdvanceBookingPolicy(int hours) : minAdvanceHours(hours) {}
+    
+    bool canBook(const Room* room, const Interval& interval, const string& userId) const override {
+        // In real system, would compare with current time
+        // Simplified: check if booking is not immediate
+        if (interval.startTime < minAdvanceHours) {
+            cout << "Policy Violation: Must book at least " << minAdvanceHours << " hours in advance.\n";
+            return false;
+        }
+        return true;
+    }
+    
+    string getPolicyName() const override {
+        return "Advance Booking (" + to_string(minAdvanceHours) + " hours notice)";
+    }
+};
+
+
+// ========== OBSERVER PATTERN ==========
+// Notification system for booking events
+
+class NotificationObserver {
+public:
+    virtual ~NotificationObserver() = default;
+    virtual void update(const string& message) = 0;
+    virtual string getObserverName() const = 0;
+};
+
+class EmailNotifier : public NotificationObserver {
+    string email;
+public:
+    EmailNotifier(const string& email) : email(email) {}
+    
+    void update(const string& message) override {
+        cout << "[EMAIL to " << email << "]: " << message << endl;
+    }
+    
+    string getObserverName() const override {
+        return "EmailNotifier(" + email + ")";
+    }
+};
+
+class SlackNotifier : public NotificationObserver {
+    string channel;
+public:
+    SlackNotifier(const string& channel) : channel(channel) {}
+    
+    void update(const string& message) override {
+        cout << "[SLACK #" << channel << "]: " << message << endl;
+    }
+    
+    string getObserverName() const override {
+        return "SlackNotifier(#" + channel + ")";
+    }
+};
+
+class SMSNotifier : public NotificationObserver {
+    string phoneNumber;
+public:
+    SMSNotifier(const string& phone) : phoneNumber(phone) {}
+    
+    void update(const string& message) override {
+        cout << "[SMS to " << phoneNumber << "]: " << message << endl;
+    }
+    
+    string getObserverName() const override {
+        return "SMSNotifier(" + phoneNumber + ")";
+    }
+};
+
+
+#endif // MODELS_HPP
+\end{lstlisting}
+
+% ============================================================
+\newpage
+\section{managers.hpp}
+% ============================================================
+\begin{lstlisting}[title={\texttt{managers.hpp}}]
+#ifndef MANAGERS_HPP
+#define MANAGERS_HPP
+
+#include<iostream>
+#include<mutex>
+#include<unordered_map>
+#include<memory>
+#include<thread>
+#include "models.hpp"
+using namespace std;
+
+// ============================================================
+// LOCKING STRATEGY: PESSIMISTIC vs OPTIMISTIC
+// ----------------------------------------------------------
+// PESSIMISTIC LOCKING (what we use here):
+//   Lock BEFORE reading/writing shared state. Assumes conflicts
+//   are likely. Simple, safe, but can reduce throughput.
+//   e.g., lock_guard on the rooms map before looking up a room.
+//
+// OPTIMISTIC LOCKING:
+//   Read without lock, do work, then check-and-commit atomically.
+//   Uses version numbers or CAS (compare-and-swap).
+//   Better throughput when conflicts are rare.
+//   e.g., Room could have a version field: read version, prepare
+//   booking, then CAS(old_version, new_version) -- retry if changed.
+//
+// WHY PESSIMISTIC HERE?
+//   Meeting rooms have high contention (many users booking same rooms).
+//   Optimistic would cause lots of retries. Pessimistic is simpler
+//   and correct for this use case.
+// ============================================================
+
+// ============================================================
+// SMART POINTER CHOICES:
+// ----------------------------------------------------------
+// shared_ptr<Room>     -> Room is in the map AND may be held by
+//                         threads doing bookings. If room is removed
+//                         mid-booking, shared_ptr keeps it alive.
+// unique_ptr<Policy>   -> Manager is the SOLE owner of the policy.
+//                         Nobody else holds a reference. Transferred
+//                         via move(). Lightweight, no ref counting.
+// shared_ptr<Observer> -> Observers are shared: caller keeps a
+//                         reference (to remove later), manager's
+//                         vector also holds one. Shared ownership.
+// raw ptr              -> Not used here. Could be used for non-owning
+//                         observer references if we didn't need
+//                         shared lifetime management.
+// ============================================================
+
+// ============================================================
+// LOCK CHOICES:
+// ----------------------------------------------------------
+// lock_guard    -> Used for simple scoped locks: addRoom, removeRoom
+//                  lookup, setPolicy, add/removeObserver.
+//                  Holds lock for entire scope. No early release.
+//
+// unique_lock   -> Used in bookRoom: we lock to find the room and
+//                  read the policy, then UNLOCK before the actual
+//                  room->book() call (which has its own per-room lock).
+//                  This avoids holding the manager lock during the
+//                  booking operation (fine-grained locking).
+//                  Also used when we need to release lock before
+//                  notifying observers (avoids deadlock).
+// ============================================================
+
+class MeetingMgr{
+    private:
+    static mutex singletonMtx;              // only for singleton creation
+
+    // operationMtx: guards rooms map, bookingPolicy, observers, etc.
+    // Separate from singletonMtx to avoid contention on getInstance()
+    mutable mutex operationMtx;
+
+    // shared_ptr<Room>: room lives in map AND may be held by booking
+    // threads concurrently. Shared ownership keeps it alive.
+    unordered_map<string, shared_ptr<Room>> rooms;
+    
+    // unique_ptr<BookingPolicy>: sole ownership by manager.
+    // Transferred via move(). Only one policy active at a time.
+    unique_ptr<BookingPolicy> bookingPolicy;
+    
+    // shared_ptr<Observer>: shared between manager's vector and
+    // the caller (who needs a reference to removeObserver later).
+    vector<shared_ptr<NotificationObserver>> observers;
+
+    MeetingMgr();
+
+    // Notify MUST be called WITHOUT operationMtx held (avoids deadlock
+    // if an observer callback triggers another manager operation)
+    void notifyObservers(const string& message);
+
+    public:
+    static shared_ptr<MeetingMgr> getInstance();
+    
+    // Room Management
+    void addRoom(const string& roomId, int capacity);
+    bool removeRoom(const string& roomId);
+    
+    // Booking Operations
+    bool bookRoom(const string& roomId, int start, int end, const string& userId);
+    bool cancelBooking(const string& roomId, const string& meetingId);
+    
+    // Query Operations
+    void viewRoomBookings(const string& roomId) const;
+    void listAllRooms() const;
+    vector<string> findAvailableRooms(int start, int end) const;
+    
+    // Strategy Pattern Methods
+    void setBookingPolicy(unique_ptr<BookingPolicy> policy);
+    
+    // Observer Pattern Methods
+    void addObserver(shared_ptr<NotificationObserver> observer);
+    void removeObserver(shared_ptr<NotificationObserver> observer);
+
+    MeetingMgr(const MeetingMgr&) = delete;
+    void operator=(const MeetingMgr&) = delete;
+};
+
+
+#endif
+\end{lstlisting}
+
+% ============================================================
+\newpage
+\section{managers.cpp}
+% ============================================================
+\begin{lstlisting}[title={\texttt{managers.cpp}}]
+#include<iostream>
+#include <string>
+#include "managers.hpp"
+#include "models.hpp"
+
+using namespace std;
+
+mutex MeetingMgr::singletonMtx;
+
+MeetingMgr::MeetingMgr() {
+    bookingPolicy = make_unique<StandardBookingPolicy>();
+}
+
+// Thread-safe singleton using function-local static
+// The C++11 standard guarantees static local init is thread-safe
+shared_ptr<MeetingMgr> MeetingMgr::getInstance(){
+    lock_guard<mutex> lock(singletonMtx);
+    static shared_ptr<MeetingMgr> instance(new MeetingMgr());
+    return instance;
+}
+
+// ============================================================
+// PESSIMISTIC LOCKING PATTERN used throughout:
+// 1. Acquire lock (operationMtx)
+// 2. Read/write shared state
+// 3. Release lock BEFORE I/O (notifications, printing)
+// This prevents deadlocks and reduces lock hold time.
+// ============================================================
+
+void MeetingMgr::addRoom(const string& roomId, int capacity){
+    // lock_guard: simple scope, hold lock while modifying rooms map
+    {
+        lock_guard<mutex> lock(operationMtx);
+        rooms[roomId] = make_shared<Room>(roomId, capacity);
+    }
+    // Lock released BEFORE I/O and notification (avoids deadlock)
+    cout << "[Thread " << this_thread::get_id() << "] "
+         << "Room " << roomId << " added (Capacity: " << capacity << ")" << endl;
+    notifyObservers("Room " + roomId + " has been added to the system.");
+}
+
+bool MeetingMgr::removeRoom(const string& roomId) {
+    shared_ptr<Room> room;
+    
+    {
+        // lock_guard: simple lookup + erase, hold for entire block
+        lock_guard<mutex> lock(operationMtx);
+        auto it = rooms.find(roomId);
+        
+        if (it == rooms.end()) {
+            cout << "Error: Room " << roomId << " does not exist." << endl;
+            return false;
+        }
+        
+        // shared_ptr ref count keeps room alive even after map erase.
+        // If another thread is mid-booking on this room, the room
+        // object stays alive until that thread's shared_ptr drops.
+        room = it->second;  // ref count: map(1) + local(1) = 2
+        rooms.erase(it);    // ref count: local(1) = 1
+    }
+    // Lock released BEFORE notification
+    
+    if (room.use_count() > 1) {
+        cout << "[Thread " << this_thread::get_id() << "] "
+             << "Room " << roomId << " removed but still in use by " 
+             << (room.use_count() - 1) << " active operation(s). "
+             << "Will be deleted when all operations complete." << endl;
+    } else {
+        cout << "[Thread " << this_thread::get_id() << "] "
+             << "Room " << roomId << " successfully removed." << endl;
+    }
+    
+    notifyObservers("Room " + roomId + " has been removed from the system.");
+    return true;
+}
+
+bool MeetingMgr::bookRoom(const string& roomId, int start, int end, const string& userId){
+    shared_ptr<Room> room;
+    
+    // ============================================================
+    // FINE-GRAINED LOCKING (2-level pessimistic):
+    // Level 1: operationMtx (manager-level) -> protects rooms map + policy
+    // Level 2: roomMtx (per-room) -> protects that room's calendar
+    //
+    // unique_lock here because we RELEASE operationMtx after
+    // looking up the room and checking the policy. Then room->book()
+    // only takes the per-room lock. This way, bookings to DIFFERENT
+    // rooms can proceed in parallel.
+    // ============================================================
+    unique_lock<mutex> lock(operationMtx);
+    
+    auto it = rooms.find(roomId);
+    if (it == rooms.end()) {
+        cout << "Error: Room " << roomId << " does not exist." << endl;
+        return false;
+    }
+    room = it->second;  // shared_ptr: room stays alive even if removed from map
+
+    try {
+        Interval interval(start, end);
+        
+        // Check policy while we still hold operationMtx
+        // (policy could be swapped by setBookingPolicy on another thread)
+        if (!bookingPolicy->canBook(room.get(), interval, userId)) {
+            cout << "POLICY REJECTION: " << userId << " cannot book Room " << roomId 
+                 << " [" << start << "-" << end << "]" << endl;
+            return false;
+        }
+        
+        // Release manager lock BEFORE room-level operation
+        // This is the KEY benefit of unique_lock over lock_guard:
+        // Other threads can now book DIFFERENT rooms in parallel
+        lock.unlock();
+        
+        string meetingId = userId + "_" + to_string(start);
+        
+        // room->book() acquires its own per-room roomMtx (Level 2 lock)
+        // This is pessimistic locking at the room level
+        bool success = room->book(meetingId, interval, userId);
+        
+        if (success) {
+            cout << "[Thread " << this_thread::get_id() << "] "
+                 << "SUCCESS: " << userId << " booked Room " << roomId 
+                 << " [" << start << "-" << end << "]" << endl;
+            // Notify OUTSIDE all locks (avoids deadlock)
+            notifyObservers(userId + " booked Room " + roomId + " [" + 
+                          to_string(start) + "-" + to_string(end) + "]");
+            return true;
+        } else {
+            cout << "[Thread " << this_thread::get_id() << "] "
+                 << "FAIL: " << userId << " could not book Room " << roomId 
+                 << " [" << start << "-" << end << "] (Conflict)" << endl;
+            return false;
+        }
+    } catch (const exception& e) {
+        cout << "Error: " << e.what() << endl;
+        return false;
+    }
+}
+
+bool MeetingMgr::cancelBooking(const string& roomId, const string& meetingId) {
+    shared_ptr<Room> room;
+    
+    {
+        // lock_guard: simple lookup, hold for short duration
+        lock_guard<mutex> lock(operationMtx);
+        auto it = rooms.find(roomId);
+        if (it == rooms.end()) {
+            cout << "Error: Room " << roomId << " does not exist." << endl;
+            return false;
+        }
+        room = it->second;
+    }
+    // Manager lock released. room->cancelBooking uses its own roomMtx.
+    
+    bool success = room->cancelBooking(meetingId);
+    
+    if (success) {
+        cout << "[Thread " << this_thread::get_id() << "] "
+             << "Booking " << meetingId << " cancelled in Room " << roomId << endl;
+        notifyObservers("Booking " + meetingId + " cancelled in Room " + roomId);
+        return true;
+    } else {
+        cout << "Booking " << meetingId << " not found in Room " << roomId << endl;
+        return false;
+    }
+}
+
+void MeetingMgr::viewRoomBookings(const string& roomId) const {
+    shared_ptr<Room> room;
+    
+    {
+        lock_guard<mutex> lock(operationMtx);
+        auto it = rooms.find(roomId);
+        if (it == rooms.end()) {
+            cout << "Error: Room " << roomId << " does not exist." << endl;
+            return;
+        }
+        room = it->second;
+    }
+    // Manager lock released. room->displayBookings uses its own roomMtx.
+    room->displayBookings();
+}
+
+void MeetingMgr::listAllRooms() const {
+    lock_guard<mutex> lock(operationMtx);
+    
+    cout << "\n=== All Meeting Rooms ===" << endl;
+    if (rooms.empty()) {
+        cout << "No rooms available." << endl;
+        return;
+    }
+    
+    for (const auto& [roomId, room] : rooms) {
+        cout << "  " << roomId << " (Capacity: " << room->getCapacity() 
+             << ", Bookings: " << room->getBookingCount() << ")" << endl;
+    }
+}
+
+vector<string> MeetingMgr::findAvailableRooms(int start, int end) const {
+    lock_guard<mutex> lock(operationMtx);
+    vector<string> availableRooms;
+    
+    for (const auto& [roomId, room] : rooms) {
+        if (room->isAvailable(start, end)) {
+            availableRooms.push_back(roomId);
+        }
+    }
+    
+    return availableRooms;
+}
+
+void MeetingMgr::setBookingPolicy(unique_ptr<BookingPolicy> policy) {
+    // lock_guard: simple one-liner write to shared state
+    lock_guard<mutex> lock(operationMtx);
+    bookingPolicy = move(policy);
+    cout << "Policy changed to: " << bookingPolicy->getPolicyName() << endl;
+}
+
+void MeetingMgr::addObserver(shared_ptr<NotificationObserver> observer) {
+    lock_guard<mutex> lock(operationMtx);
+    observers.push_back(observer);
+    cout << "Observer added: " << observer->getObserverName() << endl;
+}
+
+void MeetingMgr::removeObserver(shared_ptr<NotificationObserver> observer) {
+    lock_guard<mutex> lock(operationMtx);
+    auto it = find(observers.begin(), observers.end(), observer);
+    if (it != observers.end()) {
+        cout << "Observer removed: " << (*it)->getObserverName() << endl;
+        observers.erase(it);
+    }
+}
+
+// CRITICAL: This is called WITHOUT operationMtx held.
+// We take a snapshot of observers under lock, then notify outside lock.
+// This prevents deadlock if an observer callback triggers another
+// manager operation (which would try to acquire operationMtx again).
+void MeetingMgr::notifyObservers(const string& message) {
+    vector<shared_ptr<NotificationObserver>> snapshot;
+    {
+        lock_guard<mutex> lock(operationMtx);
+        snapshot = observers;  // copy the vector (shared_ptrs are cheap to copy)
+    }
+    // Notify outside the lock -- safe because we hold shared_ptrs
+    for (const auto& observer : snapshot) {
+        observer->update(message);
+    }
+}
+\end{lstlisting}
+
+% ============================================================
+\newpage
+\section{main.cpp}
+% ============================================================
+\begin{lstlisting}[title={\texttt{main.cpp}}]
+#include<iostream>
+#include<thread>
+#include<chrono>
+#include "managers.hpp"
+using namespace std;
+
+
+void userSimulation(string userId, string roomId, int start, int end) {
+    auto mgr = MeetingMgr::getInstance();
+    mgr->bookRoom(roomId, start, end, userId);
+}
+
+void demonstrateRemoveRoom() {
+    auto mgr = MeetingMgr::getInstance();
+    
+    cout << "\n=== Demonstrating Room Removal with Active Usage ===" << endl;
+    
+    mgr->addRoom("R3", 6);
+    
+    // Thread tries to book R3 while main thread removes it
+    // shared_ptr<Room> keeps the room alive even after map erase
+    thread t1([&]() {
+        cout << "Thread 1: Got reference to R3" << endl;
+        this_thread::sleep_for(chrono::milliseconds(100));
+        mgr->bookRoom("R3", 14, 15, "UserE");
+    });
+    
+    this_thread::sleep_for(chrono::milliseconds(50));
+    mgr->removeRoom("R3");
+    
+    t1.join();
+}
+
+int main(){
+    auto mgr = MeetingMgr::getInstance();
+
+    cout << "=== Meeting Room Booking System ===" << endl << endl;
+    
+    // ========== 1. OBSERVER PATTERN DEMO ==========
+    cout << "--- Setting up Notification Observers ---" << endl;
+    // shared_ptr<Observer>: shared between caller (to remove later)
+    // and manager's observer vector. Both need ownership.
+    auto emailNotifier = make_shared<EmailNotifier>("admin@company.com");
+    auto slackNotifier = make_shared<SlackNotifier>("meeting-rooms");
+    auto smsNotifier = make_shared<SMSNotifier>("+1-555-0123");
+    
+    mgr->addObserver(emailNotifier);
+    mgr->addObserver(slackNotifier);
+    mgr->addObserver(smsNotifier);
+    
+    
+    // ========== 2. ROOM SETUP ==========
+    cout << "\n--- Adding Rooms ---" << endl;
+    mgr->addRoom("R1", 10);
+    mgr->addRoom("R2", 4);
+    
+    mgr->listAllRooms();
+    
+    
+    // ========== 3. STRATEGY PATTERN DEMO ==========
+    cout << "\n--- Testing Booking Policies (Strategy Pattern) ---" << endl;
+    
+    // unique_ptr<BookingPolicy>: manager is sole owner. Transferred via move().
+    // When we setBookingPolicy, old policy is auto-deleted, new one takes over.
+    cout << "\nUsing Standard Policy:" << endl;
+    mgr->bookRoom("R1", 9, 14, "Alice");
+    
+    cout << "\nChanging to Max Duration Policy (3 hours max):" << endl;
+    mgr->setBookingPolicy(make_unique<MaxDurationPolicy>(3));
+    mgr->bookRoom("R1", 15, 20, "Bob");     // 5 hours - should FAIL
+    mgr->bookRoom("R1", 15, 17, "Bob");     // 2 hours - should work
+    
+    cout << "\nChanging to Advance Booking Policy (min 5 hours notice):" << endl;
+    mgr->setBookingPolicy(make_unique<AdvanceBookingPolicy>(5));
+    mgr->bookRoom("R2", 3, 4, "Charlie");     // 3hrs notice - should FAIL
+    mgr->bookRoom("R2", 10, 11, "Charlie");   // 10hrs notice - should work
+    
+    
+    // ========== 4. CONCURRENT BOOKING DEMO ==========
+    // ============================================================
+    // PESSIMISTIC LOCKING IN ACTION:
+    // - bookRoom uses unique_lock on operationMtx to find room + check policy
+    // - Then RELEASES operationMtx (fine-grained: other rooms can proceed)
+    // - room->book() uses its own lock_guard on roomMtx (per-room lock)
+    // - Two threads booking SAME room at SAME time: one wins, one gets conflict
+    // - Two threads booking DIFFERENT rooms: proceed in parallel (no contention)
+    // ============================================================
+    cout << "\n--- Concurrent Booking (Pessimistic Locking) ---" << endl;
+    cout << "UserA & UserB race for same slot on R1 (one will fail)." << endl;
+    cout << "UserC books different time on R1 (no conflict)." << endl;
+    cout << "UserD books R2 in parallel (different room, no contention)." << endl << endl;
+    
+    mgr->setBookingPolicy(make_unique<StandardBookingPolicy>());
+    
+    thread t1(userSimulation, "UserA", "R1", 20, 21);
+    thread t2(userSimulation, "UserB", "R1", 20, 21); // Conflict!
+    thread t3(userSimulation, "UserC", "R1", 21, 22); // Different time
+    thread t4(userSimulation, "UserD", "R2", 20, 21); // Different room
+    
+    t1.join();
+    t2.join();
+    t3.join();
+    t4.join();
+    
+    
+    // ========== 5. QUERY OPERATIONS ==========
+    cout << "\n--- Viewing Room Bookings ---" << endl;
+    mgr->viewRoomBookings("R1");
+    mgr->viewRoomBookings("R2");
+    
+    cout << "\n--- Finding Available Rooms ---" << endl;
+    auto available = mgr->findAvailableRooms(20, 21);
+    cout << "Rooms available [20-21]: ";
+    if (available.empty()) {
+        cout << "None" << endl;
+    } else {
+        for (const auto& room : available) {
+            cout << room << " ";
+        }
+        cout << endl;
+    }
+    
+    
+    // ========== 6. CANCEL BOOKING ==========
+    cout << "\n--- Cancelling Booking ---" << endl;
+    mgr->cancelBooking("R1", "Alice_9");
+    mgr->viewRoomBookings("R1");
+    
+    
+    // ========== 7. ROOM REMOVAL DEMO ==========
+    // shared_ptr<Room> keeps room alive if another thread holds a ref
+    cout << "\n--- Removing Room ---" << endl;
+    mgr->removeRoom("R2");
+    mgr->listAllRooms();
+    
+    mgr->bookRoom("R2", 25, 26, "UserX");  // Should fail - room removed
+    
+    
+    // ========== 8. ADVANCED: Remove room while in use ==========
+    demonstrateRemoveRoom();
+    
+    
+    // ========== 9. OBSERVER MANAGEMENT ==========
+    cout << "\n--- Removing Observer ---" << endl;
+    mgr->removeObserver(smsNotifier);
+    
+    cout << "\n--- Final Booking (fewer notifications) ---" << endl;
+    mgr->bookRoom("R1", 30, 31, "FinalUser");
+    
+    // ============================================================
+    // SUMMARY: CONCURRENCY ARCHITECTURE
+    // ----------------------------------------------------------
+    // Level 1: operationMtx (manager) -> rooms map, policy, observers
+    //   - lock_guard for simple reads/writes (addRoom, setPolicy, etc.)
+    //   - unique_lock in bookRoom (release before room-level lock)
+    //
+    // Level 2: roomMtx (per-room) -> that room's calendar
+    //   - lock_guard always (simple check+book is atomic)
+    //
+    // DEADLOCK PREVENTION:
+    //   - Always acquire Level 1 before Level 2 (never reverse)
+    //   - Release Level 1 before calling notifyObservers
+    //   - notifyObservers takes a snapshot under lock, notifies outside
+    //
+    // WHY PESSIMISTIC?
+    //   Meeting rooms = high contention. Pessimistic is simpler
+    //   and avoids retry storms that optimistic would cause.
+    // ============================================================
+    
+    cout << "\n=== Simulation Complete ===" << endl;
+    return 0;
+}
+\end{lstlisting}
+
+\end{document}

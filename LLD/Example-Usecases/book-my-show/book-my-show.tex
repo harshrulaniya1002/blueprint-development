@@ -1,0 +1,871 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=0.8in]{geometry}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{titlesec}
+\usepackage{hyperref}
+\usepackage{fancyhdr}
+
+\definecolor{codebg}{RGB}{245,245,245}
+\definecolor{codegreen}{RGB}{0,128,0}
+\definecolor{codegray}{RGB}{128,128,128}
+\definecolor{codeblue}{RGB}{0,0,180}
+\definecolor{codepurple}{RGB}{128,0,128}
+
+\lstset{
+    language=C++,
+    backgroundcolor=\color{codebg},
+    basicstyle=\ttfamily\footnotesize,
+    keywordstyle=\color{codeblue}\bfseries,
+    commentstyle=\color{codegreen}\itshape,
+    stringstyle=\color{codepurple},
+    numberstyle=\tiny\color{codegray},
+    numbers=left,
+    numbersep=5pt,
+    frame=single,
+    breaklines=true,
+    breakatwhitespace=false,
+    tabsize=4,
+    showstringspaces=false,
+    captionpos=b,
+    morekeywords={override,nullptr,string,shared_ptr,unique_ptr,make_shared,make_unique,
+                  lock_guard,unique_lock,mutex,thread,vector,unordered_map,map,
+                  chrono,steady_clock,time_point,atomic},
+}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\textbf{LLD --- Book My Show}}
+\fancyhead[R]{\thepage}
+
+\title{\Huge\textbf{Book My Show}\\[0.3em]\Large Low-Level Design --- C++ Concurrency}
+\author{LLD Interview Preparation}
+\date{}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+% ============================================================
+\section{File Structure}
+% ============================================================
+\begin{verbatim}
+book-my-show/
+  models.hpp       -- Seat, Movie, Show (showMtx), Theatre, Booking
+  strategies.hpp   -- PricingStrategy, SeatSelectionStrategy,
+                      BookingObserver
+  managers.hpp     -- BookingService (Singleton)
+  main.cpp         -- Demo: search, book, concurrent booking,
+                      cancellation, strategy switch
+\end{verbatim}
+
+\textbf{Compilation:}
+\begin{verbatim}
+g++ -std=c++17 -pthread -o book_my_show.exe main.cpp
+\end{verbatim}
+
+\subsection{Concurrency Summary}
+\begin{itemize}
+    \item \textbf{Level 1:} \texttt{serviceMtx} (BookingService) --- movies, theatres, shows, bookings, observers, strategies
+    \item \textbf{Level 2:} \texttt{showMtx} (per-Show) --- seats (booked/available)
+    \item \textbf{Lock order:} always L1 $\rightarrow$ L2 (never reverse)
+    \item Release L1 before \texttt{tryBookSeats} (per-show lock)
+    \item Multiple shows booked in parallel (no contention)
+    \item Atomic all-or-nothing seat booking (check all then book all)
+\end{itemize}
+
+\subsection{Design Patterns}
+\begin{itemize}
+    \item \textbf{Singleton:} BookingService
+    \item \textbf{Strategy:} StandardPricing, PeakHourPricing, DiscountPricing, FirstAvailableSelection
+    \item \textbf{Observer:} EmailNotifier, SMSNotifier
+\end{itemize}
+
+\subsection{Smart Pointers}
+\begin{itemize}
+    \item \texttt{shared\_ptr<Movie>} --- service map + caller
+    \item \texttt{shared\_ptr<Theatre>} --- service map + caller
+    \item \texttt{shared\_ptr<Show>} --- service map + caller
+    \item \texttt{shared\_ptr<Booking>} --- service map + caller
+    \item \texttt{unique\_ptr<PricingStrategy>} --- service sole owner
+    \item \texttt{unique\_ptr<SeatSelectionStrategy>} --- service sole owner
+    \item \texttt{shared\_ptr<BookingObserver>} --- service vector + caller
+\end{itemize}
+
+% ============================================================
+\newpage
+\section{models.hpp}
+% ============================================================
+\begin{lstlisting}[title={\texttt{models.hpp}}]
+#ifndef MODELS_HPP
+#define MODELS_HPP
+
+#include <string>
+#include <vector>
+#include <iostream>
+#include <mutex>
+#include <memory>
+#include <unordered_map>
+#include <algorithm>
+using namespace std;
+
+// ============================================================
+// ENUMS
+// ============================================================
+enum class SeatType { SILVER, GOLD, PLATINUM };
+enum class BookingStatus { CONFIRMED, CANCELLED };
+
+inline string seatTypeToString(SeatType t) {
+    switch (t) {
+        case SeatType::SILVER:   return "SILVER";
+        case SeatType::GOLD:     return "GOLD";
+        case SeatType::PLATINUM: return "PLATINUM";
+        default: return "UNKNOWN";
+    }
+}
+
+// ============================================================
+// SEAT
+// No mutex: seat state is protected by Show-level lock.
+// ============================================================
+class Seat {
+    string seatId;
+    SeatType type;
+    bool booked;
+
+public:
+    Seat(const string& id, SeatType type)
+        : seatId(id), type(type), booked(false) {}
+
+    string getId() const { return seatId; }
+    SeatType getType() const { return type; }
+    bool isBooked() const { return booked; }
+    void book() { booked = true; }
+    void cancel() { booked = false; }
+};
+
+// ============================================================
+// MOVIE
+// Immutable after creation -- no mutex needed.
+// ============================================================
+class Movie {
+    string movieId;
+    string title;
+    string genre;
+    int durationMins;
+
+public:
+    Movie(const string& id, const string& title,
+          const string& genre, int duration)
+        : movieId(id), title(title), genre(genre), durationMins(duration) {}
+
+    string getId() const { return movieId; }
+    string getTitle() const { return title; }
+    string getGenre() const { return genre; }
+    int getDuration() const { return durationMins; }
+};
+
+// ============================================================
+// SHOW
+// Has its own mutex for per-show seat locking.
+// PESSIMISTIC: lock show before checking/modifying seats.
+// Multiple shows can be booked in parallel (different locks).
+// ============================================================
+class Show {
+    string showId;
+    string movieId;
+    string theatreId;
+    int startTime;  // e.g., 14 = 2PM
+    vector<Seat> seats;
+    mutable mutex showMtx;
+
+public:
+    Show(const string& id, const string& movieId, const string& theatreId,
+         int startTime, const vector<Seat>& seats)
+        : showId(id), movieId(movieId), theatreId(theatreId),
+          startTime(startTime), seats(seats) {}
+
+    string getId() const { return showId; }
+    string getMovieId() const { return movieId; }
+    string getTheatreId() const { return theatreId; }
+    int getStartTime() const { return startTime; }
+
+    // Get available seats (thread-safe)
+    vector<string> getAvailableSeats() {
+        lock_guard<mutex> lock(showMtx);
+        vector<string> avail;
+        for (const auto& s : seats) {
+            if (!s.isBooked()) avail.push_back(s.getId());
+        }
+        return avail;
+    }
+
+    // Get available seats by type
+    vector<string> getAvailableSeatsByType(SeatType type) {
+        lock_guard<mutex> lock(showMtx);
+        vector<string> avail;
+        for (const auto& s : seats) {
+            if (!s.isBooked() && s.getType() == type)
+                avail.push_back(s.getId());
+        }
+        return avail;
+    }
+
+    // Atomic check-and-book multiple seats
+    // Returns true only if ALL requested seats are available
+    bool tryBookSeats(const vector<string>& seatIds) {
+        lock_guard<mutex> lock(showMtx);
+        // Check all first
+        for (const auto& sid : seatIds) {
+            bool found = false;
+            for (auto& s : seats) {
+                if (s.getId() == sid) {
+                    if (s.isBooked()) return false; // conflict
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) return false; // seat doesn't exist
+        }
+        // Book all
+        for (const auto& sid : seatIds) {
+            for (auto& s : seats) {
+                if (s.getId() == sid) { s.book(); break; }
+            }
+        }
+        return true;
+    }
+
+    // Cancel specific seats
+    void cancelSeats(const vector<string>& seatIds) {
+        lock_guard<mutex> lock(showMtx);
+        for (const auto& sid : seatIds) {
+            for (auto& s : seats) {
+                if (s.getId() == sid) { s.cancel(); break; }
+            }
+        }
+    }
+
+    // Get seat type for pricing
+    SeatType getSeatType(const string& seatId) {
+        lock_guard<mutex> lock(showMtx);
+        for (const auto& s : seats) {
+            if (s.getId() == seatId) return s.getType();
+        }
+        return SeatType::SILVER;
+    }
+
+    int getTotalSeats() {
+        lock_guard<mutex> lock(showMtx);
+        return seats.size();
+    }
+
+    int getAvailableCount() {
+        lock_guard<mutex> lock(showMtx);
+        int count = 0;
+        for (const auto& s : seats)
+            if (!s.isBooked()) count++;
+        return count;
+    }
+
+    void display() {
+        lock_guard<mutex> lock(showMtx);
+        int avail = 0;
+        for (const auto& s : seats)
+            if (!s.isBooked()) avail++;
+        cout << "  Show[" << showId << "] Movie: " << movieId
+             << " Theatre: " << theatreId << " Time: " << startTime
+             << ":00 Seats: " << avail << "/" << seats.size() << endl;
+    }
+};
+
+// ============================================================
+// THEATRE
+// Immutable structure. Shows are added once during setup.
+// ============================================================
+class Theatre {
+    string theatreId;
+    string name;
+    string city;
+
+public:
+    Theatre(const string& id, const string& name, const string& city)
+        : theatreId(id), name(name), city(city) {}
+
+    string getId() const { return theatreId; }
+    string getName() const { return name; }
+    string getCity() const { return city; }
+};
+
+// ============================================================
+// BOOKING
+// Immutable after creation (status changes via setStatus).
+// No mutex: protected by BookingService-level lock.
+// shared_ptr<Booking>: service map + caller both hold ref.
+// ============================================================
+class Booking {
+    string bookingId;
+    string userId;
+    string showId;
+    vector<string> seatIds;
+    double totalAmount;
+    BookingStatus status;
+
+public:
+    Booking(const string& id, const string& userId, const string& showId,
+            const vector<string>& seats, double amount)
+        : bookingId(id), userId(userId), showId(showId),
+          seatIds(seats), totalAmount(amount),
+          status(BookingStatus::CONFIRMED) {}
+
+    string getId() const { return bookingId; }
+    string getUserId() const { return userId; }
+    string getShowId() const { return showId; }
+    const vector<string>& getSeatIds() const { return seatIds; }
+    double getAmount() const { return totalAmount; }
+    BookingStatus getStatus() const { return status; }
+    void setStatus(BookingStatus s) { status = s; }
+
+    void display() const {
+        cout << "  Booking[" << bookingId << "] User: " << userId
+             << " Show: " << showId << " Seats: ";
+        for (const auto& s : seatIds) cout << s << " ";
+        cout << "| $" << totalAmount
+             << " | " << (status == BookingStatus::CONFIRMED ? "CONFIRMED" : "CANCELLED")
+             << endl;
+    }
+};
+
+#endif
+\end{lstlisting}
+
+% ============================================================
+\newpage
+\section{strategies.hpp}
+% ============================================================
+\begin{lstlisting}[title={\texttt{strategies.hpp}}]
+#ifndef STRATEGIES_HPP
+#define STRATEGIES_HPP
+
+#include "models.hpp"
+#include <memory>
+using namespace std;
+
+// ============================================================
+// STRATEGY PATTERN: Pricing
+// Different pricing based on seat type, time, etc.
+// unique_ptr<PricingStrategy>: BookingService is sole owner.
+// ============================================================
+
+class PricingStrategy {
+public:
+    virtual ~PricingStrategy() = default;
+    virtual double calculatePrice(SeatType type) = 0;
+    virtual string getName() const = 0;
+};
+
+class StandardPricing : public PricingStrategy {
+public:
+    double calculatePrice(SeatType type) override {
+        switch (type) {
+            case SeatType::SILVER:   return 150.0;
+            case SeatType::GOLD:     return 250.0;
+            case SeatType::PLATINUM: return 400.0;
+            default: return 150.0;
+        }
+    }
+    string getName() const override { return "Standard"; }
+};
+
+class PeakHourPricing : public PricingStrategy {
+    double multiplier;
+public:
+    PeakHourPricing(double mult = 1.5) : multiplier(mult) {}
+
+    double calculatePrice(SeatType type) override {
+        double base;
+        switch (type) {
+            case SeatType::SILVER:   base = 150.0; break;
+            case SeatType::GOLD:     base = 250.0; break;
+            case SeatType::PLATINUM: base = 400.0; break;
+            default: base = 150.0;
+        }
+        return base * multiplier;
+    }
+    string getName() const override { return "PeakHour"; }
+};
+
+class DiscountPricing : public PricingStrategy {
+    double discount;  // e.g., 0.8 = 20% off
+public:
+    DiscountPricing(double disc = 0.8) : discount(disc) {}
+
+    double calculatePrice(SeatType type) override {
+        double base;
+        switch (type) {
+            case SeatType::SILVER:   base = 150.0; break;
+            case SeatType::GOLD:     base = 250.0; break;
+            case SeatType::PLATINUM: base = 400.0; break;
+            default: base = 150.0;
+        }
+        return base * discount;
+    }
+    string getName() const override { return "Discount"; }
+};
+
+// ============================================================
+// STRATEGY PATTERN: Seat Selection
+// How to auto-pick seats when user doesn't specify exact seats.
+// unique_ptr<SeatSelectionStrategy>: BookingService sole owner.
+// ============================================================
+
+class SeatSelectionStrategy {
+public:
+    virtual ~SeatSelectionStrategy() = default;
+    virtual vector<string> selectSeats(Show* show, int count, SeatType preferred) = 0;
+    virtual string getName() const = 0;
+};
+
+// Pick first N available of preferred type
+class FirstAvailableSelection : public SeatSelectionStrategy {
+public:
+    vector<string> selectSeats(Show* show, int count, SeatType preferred) override {
+        auto avail = show->getAvailableSeatsByType(preferred);
+        if ((int)avail.size() < count) {
+            // Fall back to any available
+            avail = show->getAvailableSeats();
+        }
+        vector<string> result;
+        for (int i = 0; i < count && i < (int)avail.size(); i++) {
+            result.push_back(avail[i]);
+        }
+        return result;
+    }
+    string getName() const override { return "FirstAvailable"; }
+};
+
+// ============================================================
+// OBSERVER PATTERN: Booking Notifications
+// shared_ptr<BookingObserver>: service + caller shared ownership.
+// ============================================================
+
+class BookingObserver {
+public:
+    virtual ~BookingObserver() = default;
+    virtual void onBookingConfirmed(const Booking& b) = 0;
+    virtual void onBookingCancelled(const Booking& b) = 0;
+    virtual string getName() const = 0;
+};
+
+class EmailNotifier : public BookingObserver {
+public:
+    void onBookingConfirmed(const Booking& b) override {
+        cout << "    [Email] Booking " << b.getId() << " confirmed for "
+             << b.getUserId() << " ($" << b.getAmount() << ")" << endl;
+    }
+    void onBookingCancelled(const Booking& b) override {
+        cout << "    [Email] Booking " << b.getId() << " cancelled, refund $"
+             << b.getAmount() << endl;
+    }
+    string getName() const override { return "Email"; }
+};
+
+class SMSNotifier : public BookingObserver {
+public:
+    void onBookingConfirmed(const Booking& b) override {
+        cout << "    [SMS] Booking " << b.getId() << " confirmed" << endl;
+    }
+    void onBookingCancelled(const Booking& b) override {
+        cout << "    [SMS] Booking " << b.getId() << " cancelled" << endl;
+    }
+    string getName() const override { return "SMS"; }
+};
+
+#endif
+\end{lstlisting}
+
+% ============================================================
+\newpage
+\section{managers.hpp}
+% ============================================================
+\begin{lstlisting}[title={\texttt{managers.hpp}}]
+#ifndef MANAGERS_HPP
+#define MANAGERS_HPP
+
+#include "strategies.hpp"
+#include <unordered_map>
+#include <mutex>
+#include <thread>
+using namespace std;
+
+// ============================================================
+// LOCKING: 2-level pessimistic
+// Level 1: serviceMtx (BookingService)
+//   -> movies, theatres, shows, bookings maps, observers, strategies
+//   -> lock_guard for simple reads/writes
+//   -> Release before show-level locking in bookSeats
+//
+// Level 2: showMtx (per-Show)
+//   -> seats vector (booked/available state)
+//   -> lock_guard inside tryBookSeats, cancelSeats, getAvailable*
+//   -> Multiple shows booked in parallel (no contention)
+//
+// LOCK ORDER: always L1 -> L2 (never reverse)
+//
+// SMART POINTERS:
+//   shared_ptr<Movie>       -> service map + caller
+//   shared_ptr<Theatre>     -> service map + caller
+//   shared_ptr<Show>        -> service map + caller + strategies use raw ptr
+//   shared_ptr<Booking>     -> service map + caller
+//   unique_ptr<Strategy>    -> service sole owner
+//   shared_ptr<Observer>    -> service vector + caller
+// ============================================================
+
+class BookingService {
+    static mutex singletonMtx;
+    mutable mutex serviceMtx;
+
+    unordered_map<string, shared_ptr<Movie>> movies;
+    unordered_map<string, shared_ptr<Theatre>> theatres;
+    unordered_map<string, shared_ptr<Show>> shows;
+    unordered_map<string, shared_ptr<Booking>> bookings;
+
+    unique_ptr<PricingStrategy> pricingStrategy;
+    unique_ptr<SeatSelectionStrategy> seatStrategy;
+    vector<shared_ptr<BookingObserver>> observers;
+    int bookingCounter = 0;
+
+    BookingService() {
+        pricingStrategy = make_unique<StandardPricing>();
+        seatStrategy = make_unique<FirstAvailableSelection>();
+    }
+
+    void notifyConfirmed(const Booking& b) {
+        vector<shared_ptr<BookingObserver>> snap;
+        { lock_guard<mutex> lock(serviceMtx); snap = observers; }
+        for (auto& obs : snap) obs->onBookingConfirmed(b);
+    }
+
+    void notifyCancelled(const Booking& b) {
+        vector<shared_ptr<BookingObserver>> snap;
+        { lock_guard<mutex> lock(serviceMtx); snap = observers; }
+        for (auto& obs : snap) obs->onBookingCancelled(b);
+    }
+
+public:
+    static BookingService* getInstance() {
+        lock_guard<mutex> lock(singletonMtx);
+        static BookingService instance;
+        return &instance;
+    }
+
+    // --- Setup ---
+    void setPricingStrategy(unique_ptr<PricingStrategy> s) {
+        lock_guard<mutex> lock(serviceMtx);
+        pricingStrategy = move(s);
+        cout << "[Service] Pricing: " << pricingStrategy->getName() << endl;
+    }
+
+    void setSeatStrategy(unique_ptr<SeatSelectionStrategy> s) {
+        lock_guard<mutex> lock(serviceMtx);
+        seatStrategy = move(s);
+    }
+
+    void addObserver(shared_ptr<BookingObserver> obs) {
+        lock_guard<mutex> lock(serviceMtx);
+        observers.push_back(obs);
+    }
+
+    void addMovie(shared_ptr<Movie> movie) {
+        lock_guard<mutex> lock(serviceMtx);
+        movies[movie->getId()] = movie;
+        cout << "[Service] Movie added: " << movie->getTitle() << endl;
+    }
+
+    void addTheatre(shared_ptr<Theatre> theatre) {
+        lock_guard<mutex> lock(serviceMtx);
+        theatres[theatre->getId()] = theatre;
+        cout << "[Service] Theatre added: " << theatre->getName()
+             << " (" << theatre->getCity() << ")" << endl;
+    }
+
+    void addShow(shared_ptr<Show> show) {
+        lock_guard<mutex> lock(serviceMtx);
+        shows[show->getId()] = show;
+        cout << "[Service] Show added: " << show->getId()
+             << " Movie: " << show->getMovieId()
+             << " at " << show->getStartTime() << ":00" << endl;
+    }
+
+    // --- Search ---
+    vector<shared_ptr<Show>> searchShows(const string& movieId, const string& city) {
+        lock_guard<mutex> lock(serviceMtx);
+        vector<shared_ptr<Show>> result;
+        for (auto& [id, show] : shows) {
+            if (show->getMovieId() == movieId) {
+                auto it = theatres.find(show->getTheatreId());
+                if (it != theatres.end() && it->second->getCity() == city) {
+                    result.push_back(show);
+                }
+            }
+        }
+        return result;
+    }
+
+    // --- Core: Book Seats ---
+    // 1. Lock service to generate booking ID, look up show, calculate price
+    // 2. Release service lock
+    // 3. Show::tryBookSeats uses per-show lock (Level 2)
+    // 4. Lock service again to store booking
+    shared_ptr<Booking> bookSeats(const string& userId, const string& showId,
+                                   const vector<string>& seatIds) {
+        shared_ptr<Show> show;
+        string bookingId;
+        double totalAmount = 0;
+
+        // Step 1: Lookup + pricing under service lock
+        {
+            lock_guard<mutex> lock(serviceMtx);
+            auto it = shows.find(showId);
+            if (it == shows.end()) {
+                cout << "[Thread " << this_thread::get_id() << "] "
+                     << "Show not found: " << showId << endl;
+                return nullptr;
+            }
+            show = it->second;
+            bookingId = "BK_" + to_string(++bookingCounter);
+
+            // Calculate total price
+            for (const auto& sid : seatIds) {
+                SeatType type = show->getSeatType(sid);
+                totalAmount += pricingStrategy->calculatePrice(type);
+            }
+        }
+        // Service lock released
+
+        // Step 2: Try to book seats (per-show lock)
+        if (!show->tryBookSeats(seatIds)) {
+            cout << "[Thread " << this_thread::get_id() << "] "
+                 << bookingId << " FAILED: seats unavailable in " << showId << endl;
+            return nullptr;
+        }
+
+        // Step 3: Store booking
+        auto booking = make_shared<Booking>(bookingId, userId, showId,
+                                             seatIds, totalAmount);
+        {
+            lock_guard<mutex> lock(serviceMtx);
+            bookings[bookingId] = booking;
+        }
+
+        cout << "[Thread " << this_thread::get_id() << "] "
+             << bookingId << " confirmed: " << userId << " "
+             << seatIds.size() << " seats $" << totalAmount << endl;
+
+        notifyConfirmed(*booking);
+        return booking;
+    }
+
+    // Auto-select seats by type
+    shared_ptr<Booking> bookByType(const string& userId, const string& showId,
+                                    int count, SeatType preferred) {
+        shared_ptr<Show> show;
+        vector<string> selectedSeats;
+
+        {
+            lock_guard<mutex> lock(serviceMtx);
+            auto it = shows.find(showId);
+            if (it == shows.end()) return nullptr;
+            show = it->second;
+            selectedSeats = seatStrategy->selectSeats(show.get(), count, preferred);
+        }
+
+        if ((int)selectedSeats.size() < count) {
+            cout << "[Thread " << this_thread::get_id() << "] "
+                 << "Not enough seats in " << showId << endl;
+            return nullptr;
+        }
+
+        return bookSeats(userId, showId, selectedSeats);
+    }
+
+    // --- Cancel Booking ---
+    bool cancelBooking(const string& bookingId) {
+        shared_ptr<Booking> booking;
+        shared_ptr<Show> show;
+
+        {
+            lock_guard<mutex> lock(serviceMtx);
+            auto it = bookings.find(bookingId);
+            if (it == bookings.end()) {
+                cout << "Booking not found: " << bookingId << endl;
+                return false;
+            }
+            booking = it->second;
+            auto sit = shows.find(booking->getShowId());
+            if (sit != shows.end()) show = sit->second;
+        }
+
+        if (booking->getStatus() == BookingStatus::CANCELLED) {
+            cout << "Already cancelled: " << bookingId << endl;
+            return false;
+        }
+
+        // Release seats (per-show lock)
+        if (show) show->cancelSeats(booking->getSeatIds());
+
+        booking->setStatus(BookingStatus::CANCELLED);
+        cout << "[Thread " << this_thread::get_id() << "] "
+             << bookingId << " cancelled" << endl;
+
+        notifyCancelled(*booking);
+        return true;
+    }
+
+    // --- Display ---
+    void displayShows() {
+        lock_guard<mutex> lock(serviceMtx);
+        cout << "\n=== Shows ===" << endl;
+        for (auto& [id, show] : shows) show->display();
+    }
+
+    void displayBookings() {
+        lock_guard<mutex> lock(serviceMtx);
+        cout << "\n=== Bookings ===" << endl;
+        for (auto& [id, b] : bookings) b->display();
+    }
+
+    BookingService(const BookingService&) = delete;
+    BookingService& operator=(const BookingService&) = delete;
+};
+
+mutex BookingService::singletonMtx;
+
+#endif
+\end{lstlisting}
+
+% ============================================================
+\newpage
+\section{main.cpp}
+% ============================================================
+\begin{lstlisting}[title={\texttt{main.cpp}}]
+#include <iostream>
+#include <thread>
+#include <vector>
+#include "managers.hpp"
+using namespace std;
+
+int main() {
+    auto* svc = BookingService::getInstance();
+
+    cout << "=== Book My Show ===" << endl << endl;
+
+    // Observers
+    svc->addObserver(make_shared<EmailNotifier>());
+    svc->addObserver(make_shared<SMSNotifier>());
+
+    // ========== Setup ==========
+    cout << "--- Setup ---" << endl;
+
+    // Movies
+    auto movie1 = make_shared<Movie>("M1", "Interstellar", "Sci-Fi", 169);
+    auto movie2 = make_shared<Movie>("M2", "Inception", "Thriller", 148);
+    svc->addMovie(movie1);
+    svc->addMovie(movie2);
+
+    // Theatres
+    auto theatre1 = make_shared<Theatre>("T1", "PVR Saket", "Delhi");
+    auto theatre2 = make_shared<Theatre>("T2", "INOX CP", "Delhi");
+    svc->addTheatre(theatre1);
+    svc->addTheatre(theatre2);
+
+    // Shows with seats
+    // Show 1: Interstellar at PVR Saket, 2PM
+    vector<Seat> seats1;
+    seats1.push_back(Seat("S1", SeatType::SILVER));
+    seats1.push_back(Seat("S2", SeatType::SILVER));
+    seats1.push_back(Seat("S3", SeatType::SILVER));
+    seats1.push_back(Seat("G1", SeatType::GOLD));
+    seats1.push_back(Seat("G2", SeatType::GOLD));
+    seats1.push_back(Seat("P1", SeatType::PLATINUM));
+    svc->addShow(make_shared<Show>("SH1", "M1", "T1", 14, seats1));
+
+    // Show 2: Interstellar at INOX CP, 6PM
+    vector<Seat> seats2;
+    seats2.push_back(Seat("S1", SeatType::SILVER));
+    seats2.push_back(Seat("S2", SeatType::SILVER));
+    seats2.push_back(Seat("G1", SeatType::GOLD));
+    seats2.push_back(Seat("G2", SeatType::GOLD));
+    seats2.push_back(Seat("P1", SeatType::PLATINUM));
+    seats2.push_back(Seat("P2", SeatType::PLATINUM));
+    svc->addShow(make_shared<Show>("SH2", "M1", "T2", 18, seats2));
+
+    // Show 3: Inception at PVR Saket, 8PM
+    vector<Seat> seats3;
+    seats3.push_back(Seat("S1", SeatType::SILVER));
+    seats3.push_back(Seat("S2", SeatType::SILVER));
+    seats3.push_back(Seat("G1", SeatType::GOLD));
+    seats3.push_back(Seat("P1", SeatType::PLATINUM));
+    svc->addShow(make_shared<Show>("SH3", "M2", "T1", 20, seats3));
+
+    // ========== Search ==========
+    cout << "\n--- Search: Interstellar in Delhi ---" << endl;
+    auto results = svc->searchShows("M1", "Delhi");
+    for (auto& show : results) show->display();
+
+    // ========== Sequential Booking ==========
+    cout << "\n--- Sequential Bookings (Standard Pricing) ---" << endl;
+    svc->bookSeats("Alice", "SH1", {"G1", "G2"});     // 2 Gold
+    svc->bookSeats("Bob", "SH1", {"P1"});              // 1 Platinum
+    svc->bookSeats("Charlie", "SH1", {"G1"});          // FAIL: G1 already taken
+
+    // ========== Auto-select by type ==========
+    cout << "\n--- Auto-select 2 Silver seats ---" << endl;
+    svc->bookByType("Diana", "SH1", 2, SeatType::SILVER);
+
+    // ========== Strategy switch: Peak Hour Pricing ==========
+    cout << "\n--- Switch to Peak Hour Pricing (1.5x) ---" << endl;
+    svc->setPricingStrategy(make_unique<PeakHourPricing>(1.5));
+    svc->bookSeats("Eve", "SH2", {"P1", "P2"});       // 2 Platinum at peak price
+
+    // ========== Concurrent Bookings ==========
+    // Two users race for the same seats on SH2
+    // Per-show lock ensures only one wins
+    cout << "\n--- Concurrent Bookings (2 users race for same seats) ---" << endl;
+    vector<shared_ptr<Booking>> concResults(3);
+    vector<thread> threads;
+
+    auto bookFn = [&](int idx, const string& user, const string& show,
+                      vector<string> seats) {
+        concResults[idx] = svc->bookSeats(user, show, seats);
+    };
+
+    threads.emplace_back(bookFn, 0, "Frank", "SH2", vector<string>{"G1", "G2"});
+    threads.emplace_back(bookFn, 1, "Grace", "SH2", vector<string>{"G1"});  // Conflict with Frank
+    threads.emplace_back(bookFn, 2, "Hank", "SH3", vector<string>{"G1", "P1"}); // Different show, parallel
+
+    for (auto& t : threads) t.join();
+
+    // ========== Cancellation ==========
+    cout << "\n--- Cancellation ---" << endl;
+    svc->cancelBooking("BK_1");  // Cancel Alice's Gold seats
+    cout << "\n--- Rebook cancelled seats ---" << endl;
+    svc->bookSeats("Ivan", "SH1", {"G1", "G2"});  // Should succeed now
+
+    // ========== Discount Pricing ==========
+    cout << "\n--- Switch to Discount Pricing (20% off) ---" << endl;
+    svc->setPricingStrategy(make_unique<DiscountPricing>(0.8));
+    svc->bookSeats("Jane", "SH3", {"S1", "S2"});
+
+    // ========== Display ==========
+    svc->displayShows();
+    svc->displayBookings();
+
+    cout << "\n=== Done ===" << endl;
+    return 0;
+}
+\end{lstlisting}
+
+\end{document}
