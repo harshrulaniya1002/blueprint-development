@@ -23,6 +23,37 @@ g++ -std=c++17 -pthread -o app.exe main.cpp
 
 ---
 
+## 7. PROJECT FOLDER STRUCTURE
+
+```
+project/
+  models.hpp       — Data classes, enums, per-entity mutexes
+  strategies.hpp   — Strategy pattern, Observer pattern, Chain of Responsibility
+  managers.hpp     — Singleton manager(s), concurrency logic, static mutex init
+  main.cpp         — Demo: sequential + concurrent + cancellation + strategy switch
+```
+
+## 8. SETUP STEPS
+
+1. Open a terminal in the repository root (`/Users/harshvardhan/Documents/development/Dev`).
+2. Confirm the project folder exists:
+   ```bash
+   ls project
+   ```
+3. Compile the project from the root directory:
+   ```bash
+g++ -std=c++17 -pthread -o app.exe project/main.cpp
+   ```
+4. Run the generated executable:
+   ```bash
+   ./app.exe
+   ```
+5. When you add code, place data model definitions in `project/models.hpp`, algorithm implementations in `project/strategies.hpp`, orchestration logic in `project/managers.hpp`, and demo/test execution in `project/main.cpp`.
+
+> Tip: use a flat folder layout for interview-friendly clarity, with only one `.cpp` file and supporting headers.
+
+---
+
 ## 2. WHICH POINTER TO USE WHEN
 
 | Pointer | Use When | Example |
