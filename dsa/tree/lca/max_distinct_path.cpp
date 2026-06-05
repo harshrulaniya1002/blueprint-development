@@ -1,4 +1,5 @@
-
+#include<bits/stdc++.h>
+using namespace std;
 // 2846. Minimum Edge Weight Equilibrium Queries in a Tree
 
 class Solution {
