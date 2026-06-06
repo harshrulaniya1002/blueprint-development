@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Concurrent Elevator System Simulator</title>
+<style>
+body{font-family:Segoe UI,sans-serif;margin:0;background:#eef2f7}
+header{background:#1e40af;color:white;padding:16px;text-align:center}
+.container{display:grid;grid-template-columns:2fr 1fr;gap:16px;padding:16px}
+.card{background:white;border-radius:12px;padding:16px;box-shadow:0 2px 8px rgba(0,0,0,.1)}
+.elevators{display:flex;justify-content:space-around}
+.shaft{height:500px;width:120px;border:3px solid #333;position:relative;background:white}
+.floorline{height:50px;border-bottom:1px solid #ddd}
+.cabin{position:absolute;left:10px;width:95px;height:40px;background:orange;border-radius:8px;
+display:flex;align-items:center;justify-content:center;font-weight:bold;color:white;transition:all .8s}
+button,select{width:100%;padding:10px;margin-top:8px}
+.log{height:220px;overflow:auto;background:#111;color:#0f0;padding:10px;font-family:monospace}
+.thread{padding:8px;margin:6px 0;border-left:4px solid #2563eb;background:#dbeafe}
+.locked{background:#fee2e2;color:#b91c1c;padding:10px;border-radius:8px;text-align:center}
+.unlocked{background:#dcfce7;color:#166534;padding:10px;border-radius:8px;text-align:center}
+.patterns{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.pattern{background:#f3f4f6;padding:8px;border-radius:8px;text-align:center}
+.status{font-size:14px;margin-top:6px}
+</style>
+</head>
+<body>
+<header>
+<h1>🚀 Concurrent Elevator System Simulator</h1>
+<p>Singleton • Strategy • Observer • Command • Mutex • Threads</p>
+</header>
+
+<div class="container">
+<div>
+<div class="card">
+<h2>🛗 Elevators</h2>
+<div class="elevators" id="elevators"></div>
+</div>
+
+<div class="card" style="margin-top:16px">
+<h2>🔔 Observer Events</h2>
+<div class="log" id="log"></div>
+</div>
+</div>
+
+<div>
+<div class="card">
+<h3>📞 Add Request</h3>
+<select id="floor"></select>
+<button onclick="addRequest('UP')">⬆ UP</button>
+<button onclick="addRequest('DOWN')">⬇ DOWN</button>
+<button onclick="simulateConcurrent()">🧵 Concurrent Requests</button>
+<button onclick="step()">▶ Run Step</button>
+</div>
+
+<div class="card">
+<h3>🔒 Controller Mutex</h3>
+<div id="mutex" class="unlocked">UNLOCKED</div>
+</div>
+
+<div class="card">
+<h3>🧵 Threads</h3>
+<div id="threads"></div>
+</div>
+
+<div class="card">
+<h3>🎨 Design Patterns</h3>
+<div class="patterns">
+<div class="pattern">🏢 Singleton</div>
+<div class="pattern">🎯 Strategy</div>
+<div class="pattern">🔔 Observer</div>
+<div class="pattern">📨 Command</div>
+</div>
+</div>
+</div>
+</div>
+
+<script>
+const elevators=[
+{id:1,floor:0,direction:'IDLE',requests:[]},
+{id:2,floor:0,direction:'IDLE',requests:[]},
+{id:3,floor:0,direction:'IDLE',requests:[]}
+];
+
+function log(msg){
+ const d=new Date().toLocaleTimeString();
+ document.getElementById('log').innerHTML += `[${d}] ${msg}<br>`;
+}
+
+for(let i=0;i<=9;i++){
+ let o=document.createElement('option');
+ o.text=i;o.value=i;
+ floor.appendChild(o);
+}
+
+function renderElevators(){
+ const root=document.getElementById('elevators');
+ root.innerHTML='';
+ elevators.forEach(e=>{
+  const wrap=document.createElement('div');
+  wrap.innerHTML=`
+  <h4>E${e.id}</h4>
+  <div class="shaft" id="shaft${e.id}">
+   ${Array.from({length:10},()=>'<div class="floorline"></div>').join('')}
+   <div class="cabin" style="bottom:${e.floor*50+5}px">E${e.id}</div>
+  </div>
+  <div class="status">
+   Floor:${e.floor}<br>
+   Direction:${e.direction}<br>
+   Requests:${e.requests.length}
+  </div>`;
+  root.appendChild(wrap);
+ });
+}
+
+function renderThreads(arr){
+ const root=document.getElementById('threads');
+ root.innerHTML='';
+ arr.forEach(t=>{
+  root.innerHTML += `<div class="thread">${t}</div>`;
+ });
+}
+
+function lockMutex(){
+ let m=document.getElementById('mutex');
+ m.className='locked';
+ m.innerText='LOCKED';
+ setTimeout(()=>{
+  m.className='unlocked';
+  m.innerText='UNLOCKED';
+ },1500);
+}
+
+function findBestElevator(floor){
+ let best=elevators[0];
+ let dist=Math.abs(best.floor-floor);
+ elevators.forEach(e=>{
+  let d=Math.abs(e.floor-floor);
+  if(d<dist){dist=d;best=e;}
+ });
+ return best;
+}
+
+function addRequest(dir){
+ const f=parseInt(document.getElementById('floor').value);
+ lockMutex();
+ let e=findBestElevator(f);
+ e.requests.push(f);
+ log(`🎯 Strategy selected Elevator ${e.id} for Floor ${f} (${dir})`);
+ renderElevators();
+}
+
+function step(){
+ elevators.forEach(e=>{
+  if(e.requests.length){
+    let target=e.requests[0];
+    if(e.floor<target){e.floor++;e.direction='UP';}
+    else if(e.floor>target){e.floor--;e.direction='DOWN';}
+    else{
+      log(`🔔 Elevator ${e.id} reached Floor ${target}`);
+      e.requests.shift();
+      e.direction='IDLE';
+    }
+  }
+ });
+ renderElevators();
+}
+
+function simulateConcurrent(){
+ renderThreads([
+ 'Thread-1 -> Floor 7 UP',
+ 'Thread-2 -> Floor 1 DOWN',
+ 'Thread-3 -> Floor 9 UP'
+ ]);
+ lockMutex();
+ setTimeout(()=>addAuto(7,'UP'),200);
+ setTimeout(()=>addAuto(1,'DOWN'),400);
+ setTimeout(()=>addAuto(9,'UP'),600);
+}
+
+function addAuto(f,dir){
+ let e=findBestElevator(f);
+ e.requests.push(f);
+ log(`🧵 Concurrent Request: Elevator ${e.id} assigned to Floor ${f} (${dir})`);
+ renderElevators();
+}
+
+renderElevators();
+</script>
+</body>
+</html>
