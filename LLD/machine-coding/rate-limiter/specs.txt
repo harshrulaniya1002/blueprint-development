@@ -1,0 +1,11 @@
+Design a rate limiting library that supports the following advanced requirements:
+
+1) Granular limits: Support different rate limits for different API Endpoints (eg: /login has 5 requests/min,
+/search has 100 req/min)
+
+2) Multi-Period Constraints: Support Multiple time windows for the same API (eg: 10 req per minute AND 500 req per DAY)
+
+3) Combined/Aggregate Limits: Support rate limits that apply to a group of APIs combined (eg: total requests to /upload 
+and /download together should not exceed 50 per hour)
+
+4) The system should be thread safe and provide low latency decisions
