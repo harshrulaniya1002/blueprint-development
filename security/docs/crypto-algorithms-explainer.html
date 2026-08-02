@@ -1,0 +1,1262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cryptography Algorithms — Complete Guide</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --surface2: #1f2937;
+      --border: #30363d;
+      --accent: #58a6ff;
+      --accent2: #3fb950;
+      --accent3: #f78166;
+      --accent4: #d2a8ff;
+      --accent5: #ffa657;
+      --accent6: #79c0ff;
+      --text: #e6edf3;
+      --text-muted: #8b949e;
+      --text-dim: #6e7681;
+      --warn: #d29922;
+      --danger: #f85149;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      line-height: 1.7;
+    }
+
+    /* ── NAV ── */
+    nav {
+      position: sticky; top: 0; z-index: 100;
+      background: rgba(13,17,23,0.92);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+      padding: 0 2rem;
+      display: flex; align-items: center; gap: 2rem;
+      height: 56px; overflow-x: auto; white-space: nowrap;
+    }
+    nav .brand { font-weight: 700; font-size: 1rem; color: var(--accent); flex-shrink: 0; }
+    nav a {
+      color: var(--text-muted); text-decoration: none; font-size: 0.82rem;
+      padding: 4px 10px; border-radius: 6px; transition: all .2s;
+    }
+    nav a:hover { color: var(--text); background: var(--surface); }
+
+    /* ── HERO ── */
+    .hero {
+      background: linear-gradient(135deg, #0d1117 0%, #161b22 50%, #0d1117 100%);
+      padding: 80px 2rem 60px;
+      text-align: center;
+      border-bottom: 1px solid var(--border);
+      position: relative; overflow: hidden;
+    }
+    .hero::before {
+      content: '';
+      position: absolute; inset: 0;
+      background: radial-gradient(ellipse at 50% 0%, rgba(88,166,255,0.08) 0%, transparent 70%);
+    }
+    .hero h1 { font-size: clamp(1.8rem, 4vw, 3rem); font-weight: 800; position: relative;
+      background: linear-gradient(90deg, var(--accent), var(--accent4)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    .hero p { margin-top: 1rem; color: var(--text-muted); font-size: 1.05rem; max-width: 640px; margin-inline: auto; position: relative; }
+
+    /* ── LAYOUT ── */
+    .container { max-width: 1100px; margin: 0 auto; padding: 3rem 2rem; }
+
+    section { margin-bottom: 5rem; }
+    section:target { scroll-margin-top: 70px; }
+
+    h2 {
+      font-size: 1.6rem; font-weight: 700;
+      padding-bottom: .5rem;
+      border-bottom: 2px solid var(--border);
+      margin-bottom: 2rem;
+      display: flex; align-items: center; gap: .6rem;
+    }
+    h2 .tag {
+      font-size: .65rem; font-weight: 600; letter-spacing: .08em; text-transform: uppercase;
+      padding: 2px 8px; border-radius: 4px; vertical-align: middle;
+    }
+    h3 { font-size: 1.1rem; font-weight: 600; margin: 1.8rem 0 .8rem; color: var(--accent6); }
+
+    p { color: var(--text-muted); margin-bottom: .9rem; }
+    strong { color: var(--text); }
+
+    /* ── CARDS ── */
+    .card-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+      gap: 1.25rem;
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1.4rem;
+      transition: border-color .2s, transform .15s;
+    }
+    .card:hover { border-color: var(--accent); transform: translateY(-2px); }
+    .card h4 { font-size: 1rem; font-weight: 700; margin-bottom: .5rem; }
+    .card p { font-size: .875rem; margin: 0; }
+
+    /* ── ALGORITHM TABLE ── */
+    .algo-table {
+      width: 100%; border-collapse: collapse;
+      font-size: .875rem;
+      margin: 1rem 0 2rem;
+    }
+    .algo-table th {
+      background: var(--surface2);
+      color: var(--text); text-align: left;
+      padding: .7rem 1rem;
+      border: 1px solid var(--border);
+      font-size: .78rem; text-transform: uppercase; letter-spacing: .06em;
+    }
+    .algo-table td {
+      padding: .7rem 1rem;
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      vertical-align: top;
+    }
+    .algo-table tr:hover td { background: var(--surface2); }
+    .algo-table td:first-child { font-weight: 600; color: var(--text); white-space: nowrap; }
+
+    /* ── BADGE ── */
+    .badge {
+      display: inline-block; font-size: .7rem; font-weight: 600;
+      padding: 2px 7px; border-radius: 20px; margin: 2px 2px 2px 0;
+    }
+    .badge-blue  { background: rgba(88,166,255,.15);  color: var(--accent); }
+    .badge-green { background: rgba(63,185,80,.15);   color: var(--accent2); }
+    .badge-red   { background: rgba(248,81,73,.15);   color: var(--danger); }
+    .badge-purple{ background: rgba(210,168,255,.15); color: var(--accent4); }
+    .badge-orange{ background: rgba(255,166,87,.15);  color: var(--accent5); }
+    .badge-warn  { background: rgba(210,153,34,.15);  color: var(--warn); }
+
+    /* ── DH DIAGRAM ── */
+    .dh-diagram {
+      display: flex; align-items: center; justify-content: center;
+      gap: 1rem; flex-wrap: wrap;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 12px; padding: 2rem; margin: 1.5rem 0;
+      font-size: .85rem;
+    }
+    .dh-box {
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 10px; padding: 1rem 1.4rem; text-align: center; min-width: 120px;
+    }
+    .dh-box .label { font-weight: 700; font-size: 1rem; margin-bottom: .25rem; }
+    .dh-box .sub { color: var(--text-muted); font-size: .78rem; }
+    .arrow {
+      color: var(--accent); font-size: 1.4rem; display: flex;
+      flex-direction: column; align-items: center; gap: .1rem;
+    }
+    .arrow span { font-size: .72rem; color: var(--text-muted); }
+
+    /* ── TLS FLOW ── */
+    .tls-flow {
+      display: flex; flex-direction: column; gap: .6rem;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 12px; padding: 1.8rem;
+    }
+    .tls-step {
+      display: flex; align-items: flex-start; gap: 1rem;
+    }
+    .tls-step .num {
+      flex-shrink: 0; width: 28px; height: 28px; border-radius: 50%;
+      background: linear-gradient(135deg, var(--accent), var(--accent4));
+      display: flex; align-items: center; justify-content: center;
+      font-size: .75rem; font-weight: 700; color: #000;
+    }
+    .tls-step .content { padding-top: 3px; }
+    .tls-step .content strong { color: var(--text); font-size: .9rem; }
+    .tls-step .content p { font-size: .82rem; margin: .2rem 0 0; }
+
+    /* ── PQ CARDS ── */
+    .pq-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--accent4);
+      border-radius: 12px; padding: 1.3rem;
+      margin-bottom: 1rem;
+    }
+    .pq-card h4 { font-size: 1rem; font-weight: 700; margin-bottom: .4rem; color: var(--accent4); }
+    .pq-card p { font-size: .875rem; margin: 0 0 .4rem; }
+
+    /* ── CALLOUT ── */
+    .callout {
+      display: flex; gap: .9rem;
+      border-radius: 10px; padding: 1rem 1.2rem;
+      margin: 1.2rem 0;
+    }
+    .callout-info  { background: rgba(88,166,255,.08);  border: 1px solid rgba(88,166,255,.3); }
+    .callout-warn  { background: rgba(210,153,34,.08);  border: 1px solid rgba(210,153,34,.3); }
+    .callout-danger{ background: rgba(248,81,73,.08);   border: 1px solid rgba(248,81,73,.3); }
+    .callout-green { background: rgba(63,185,80,.08);   border: 1px solid rgba(63,185,80,.3); }
+    .callout .icon { font-size: 1.2rem; flex-shrink: 0; margin-top: 1px; }
+    .callout .body p { font-size: .875rem; margin: 0; }
+    .callout .body strong { color: var(--text); }
+
+    /* ── CODE ── */
+    code {
+      font-family: 'Cascadia Code', 'Fira Code', monospace;
+      background: var(--surface2); border: 1px solid var(--border);
+      padding: 1px 6px; border-radius: 4px; font-size: .82em;
+      color: var(--accent6);
+    }
+    pre {
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 10px; padding: 1.2rem; overflow-x: auto;
+      font-size: .82rem; line-height: 1.6; margin: 1rem 0;
+    }
+    pre code { background: none; border: none; padding: 0; font-size: inherit; }
+
+    /* ── COMPARISON ── */
+    .vs-row { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 1.2rem 0; }
+    .vs-panel {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 10px; padding: 1.2rem;
+    }
+    .vs-panel h4 { font-size: .95rem; font-weight: 700; margin-bottom: .7rem; }
+    .vs-panel ul { padding-left: 1.2rem; }
+    .vs-panel ul li { font-size: .855rem; color: var(--text-muted); margin-bottom: .3rem; }
+    .vs-panel ul li strong { color: var(--text); }
+
+    /* ── FOOTER ── */
+    footer {
+      text-align: center; padding: 2.5rem;
+      border-top: 1px solid var(--border);
+      color: var(--text-dim); font-size: .82rem;
+    }
+
+    @media (max-width: 600px) {
+      .vs-row { grid-template-columns: 1fr; }
+      .dh-diagram { flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+
+<nav>
+  <span class="brand">🔐 CryptoGuide</span>
+  <a href="#symmetric">Symmetric</a>
+  <a href="#asymmetric">Asymmetric</a>
+  <a href="#signatures">Signatures</a>
+  <a href="#ecc">Elliptic Curves</a>
+  <a href="#dh">Diffie-Hellman</a>
+  <a href="#tls">TLS 1.3</a>
+  <a href="#pq">Post-Quantum</a>
+  <a href="#comparison">Comparison</a>
+</nav>
+
+<div class="hero">
+  <h1>Cryptographic Algorithms — Complete Guide</h1>
+  <p>Symmetric, Asymmetric, Signatures, Elliptic Curves, Diffie-Hellman, TLS 1.3 usage, and Post-Quantum cryptography — all in one place.</p>
+</div>
+
+<div class="container">
+
+  <!-- ══════════════════════════════════════════════ -->
+  <!--  SYMMETRIC                                     -->
+  <!-- ══════════════════════════════════════════════ -->
+  <section id="symmetric">
+    <h2>
+      🔁 Symmetric Encryption
+      <span class="tag badge-green">Same Key</span>
+    </h2>
+
+    <p>
+      In symmetric encryption, the <strong>same secret key</strong> is used to both encrypt and decrypt data.
+      It is fast and efficient, making it ideal for bulk data encryption. The primary challenge is
+      <strong>key distribution</strong> — both parties must share the key securely beforehand.
+    </p>
+
+    <div class="vs-row">
+      <div class="vs-panel">
+        <h4 style="color: var(--accent2)">✅ Advantages</h4>
+        <ul>
+          <li><strong>Fast</strong> — hardware-accelerated (AES-NI)</li>
+          <li>Suitable for <strong>large data volumes</strong></li>
+          <li>Simple key management for closed systems</li>
+          <li>Low computational overhead</li>
+        </ul>
+      </div>
+      <div class="vs-panel">
+        <h4 style="color: var(--danger)">❌ Disadvantages</h4>
+        <ul>
+          <li><strong>Key distribution problem</strong> — how do you share the key securely?</li>
+          <li>Doesn't provide <strong>non-repudiation</strong></li>
+          <li>Each pair of communicators needs a unique key</li>
+          <li>Key compromise breaks all past/future messages</li>
+        </ul>
+      </div>
+    </div>
+
+    <h3>Common Symmetric Algorithms</h3>
+    <table class="algo-table">
+      <thead>
+        <tr>
+          <th>Algorithm</th>
+          <th>Key Size</th>
+          <th>Block/Stream</th>
+          <th>Use Cases</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>AES-128/256</td>
+          <td>128 / 256 bit</td>
+          <td>Block (128-bit)</td>
+          <td>TLS record encryption, disk encryption, VPNs, file encryption</td>
+          <td><span class="badge badge-green">Recommended</span></td>
+        </tr>
+        <tr>
+          <td>AES-GCM</td>
+          <td>128 / 256 bit</td>
+          <td>AEAD mode</td>
+          <td>TLS 1.3 cipher suite, authenticated encryption with nonce</td>
+          <td><span class="badge badge-green">Preferred in TLS</span></td>
+        </tr>
+        <tr>
+          <td>ChaCha20-Poly1305</td>
+          <td>256 bit</td>
+          <td>Stream + MAC</td>
+          <td>Mobile TLS (no AES-NI), QUIC, WireGuard, OpenSSH</td>
+          <td><span class="badge badge-green">Recommended</span></td>
+        </tr>
+        <tr>
+          <td>3DES</td>
+          <td>112 / 168 bit</td>
+          <td>Block (64-bit)</td>
+          <td>Legacy banking, old TLS</td>
+          <td><span class="badge badge-warn">Deprecated</span></td>
+        </tr>
+        <tr>
+          <td>DES</td>
+          <td>56 bit</td>
+          <td>Block (64-bit)</td>
+          <td>Legacy only</td>
+          <td><span class="badge badge-red">Broken</span></td>
+        </tr>
+        <tr>
+          <td>RC4</td>
+          <td>40–2048 bit</td>
+          <td>Stream</td>
+          <td>Old WEP, old SSL</td>
+          <td><span class="badge badge-red">Broken</span></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>AES Cipher Modes</h3>
+    <table class="algo-table">
+      <thead>
+        <tr><th>Mode</th><th>Auth?</th><th>Parallel?</th><th>Best For</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>ECB</td><td>No</td><td>Yes</td><td>Never use — patterns visible in ciphertext</td></tr>
+        <tr><td>CBC</td><td>No</td><td>Decrypt only</td><td>Legacy — vulnerable to padding oracle attacks</td></tr>
+        <tr><td>CTR</td><td>No</td><td>Yes</td><td>Stream-like mode, good for random access</td></tr>
+        <tr><td>GCM</td><td>Yes (AEAD)</td><td>Yes</td><td>TLS 1.3, HTTPS — industry standard</td></tr>
+        <tr><td>CCM</td><td>Yes (AEAD)</td><td>No</td><td>IoT / constrained environments (802.15.4)</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout callout-info">
+      <div class="icon">💡</div>
+      <div class="body"><p><strong>Key insight:</strong> AES-GCM provides both <strong>confidentiality</strong> and <strong>integrity/authenticity</strong> in a single pass (AEAD — Authenticated Encryption with Associated Data). TLS 1.3 mandates AEAD cipher suites exclusively.</p></div>
+    </div>
+  </section>
+
+
+  <!-- ══════════════════════════════════════════════ -->
+  <!--  ASYMMETRIC                                    -->
+  <!-- ══════════════════════════════════════════════ -->
+  <section id="asymmetric">
+    <h2>
+      🔓 Asymmetric (Public-Key) Encryption
+      <span class="tag badge-blue">Key Pair</span>
+    </h2>
+
+    <p>
+      Asymmetric cryptography uses a mathematically linked <strong>key pair</strong>: a <em>public key</em>
+      (freely shared) and a <em>private key</em> (kept secret). Data encrypted with the public key can only
+      be decrypted with the corresponding private key, and vice versa.
+    </p>
+
+    <div class="vs-row">
+      <div class="vs-panel">
+        <h4 style="color: var(--accent2)">✅ Advantages</h4>
+        <ul>
+          <li>Solves the <strong>key distribution problem</strong></li>
+          <li>Enables <strong>digital signatures</strong> and non-repudiation</li>
+          <li>Foundation of PKI, TLS, SSH, PGP</li>
+          <li>Enables <strong>key exchange</strong> without pre-shared secret</li>
+        </ul>
+      </div>
+      <div class="vs-panel">
+        <h4 style="color: var(--danger)">❌ Disadvantages</h4>
+        <ul>
+          <li><strong>Slow</strong> — 100–1000× slower than symmetric</li>
+          <li>Large key sizes (RSA 2048–4096 bit)</li>
+          <li>Vulnerable to <strong>quantum computers</strong> (Shor's algorithm)</li>
+          <li>Complex key management infrastructure (PKI)</li>
+        </ul>
+      </div>
+    </div>
+
+    <h3>Common Asymmetric Algorithms</h3>
+    <table class="algo-table">
+      <thead>
+        <tr><th>Algorithm</th><th>Key Size</th><th>Based On</th><th>Use Cases</th><th>Status</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>RSA-2048</td>
+          <td>2048 bit</td>
+          <td>Integer factorization</td>
+          <td>TLS certificates, email encryption (S/MIME), legacy key exchange</td>
+          <td><span class="badge badge-warn">Minimum acceptable</span></td>
+        </tr>
+        <tr>
+          <td>RSA-4096</td>
+          <td>4096 bit</td>
+          <td>Integer factorization</td>
+          <td>Long-lived certificates, CA roots</td>
+          <td><span class="badge badge-green">Stronger</span></td>
+        </tr>
+        <tr>
+          <td>RSA-OAEP</td>
+          <td>2048+ bit</td>
+          <td>Integer factorization</td>
+          <td>Key encapsulation, encrypting session keys</td>
+          <td><span class="badge badge-green">Use for encryption</span></td>
+        </tr>
+        <tr>
+          <td>ElGamal</td>
+          <td>2048+ bit</td>
+          <td>Discrete log (DLP)</td>
+          <td>PGP encryption, academic use</td>
+          <td><span class="badge badge-blue">Specialized</span></td>
+        </tr>
+        <tr>
+          <td>ECIES</td>
+          <td>256–521 bit</td>
+          <td>ECDLP</td>
+          <td>Mobile encryption, Ethereum, compact key encapsulation</td>
+          <td><span class="badge badge-green">Recommended</span></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout callout-warn">
+      <div class="icon">⚠️</div>
+      <div class="body"><p><strong>Important:</strong> In TLS 1.3, RSA and static DH are no longer used for key exchange. They are replaced by ephemeral ECDHE. RSA/ECDSA remain only for <strong>certificate authentication (signatures)</strong>.</p></div>
+    </div>
+
+    <h3>How RSA Works (conceptually)</h3>
+    <pre><code>-- Key Generation --
+Choose large primes p, q  →  n = p × q  (modulus)
+φ(n) = (p-1)(q-1)
+Public key:  (n, e)  where gcd(e, φ(n)) = 1  [e = 65537 is standard]
+Private key: (n, d)  where e·d ≡ 1 (mod φ(n))
+
+-- Encrypt --    C = M^e mod n
+-- Decrypt --    M = C^d mod n
+
+Security: Factoring n into p and q is computationally infeasible for large n.</code></pre>
+  </section>
+
+
+  <!-- ══════════════════════════════════════════════ -->
+  <!--  SIGNATURES                                    -->
+  <!-- ══════════════════════════════════════════════ -->
+  <section id="signatures">
+    <h2>
+      ✍️ Digital Signature Algorithms
+      <span class="tag badge-purple">Auth + Integrity</span>
+    </h2>
+
+    <p>
+      Digital signatures provide <strong>authentication</strong>, <strong>integrity</strong>, and
+      <strong>non-repudiation</strong>. The signer uses their <em>private key</em> to sign;
+      anyone with the <em>public key</em> can verify.
+    </p>
+
+    <pre><code>Sign:   signature = Sign(privateKey, hash(message))
+Verify: valid     = Verify(publicKey, message, signature)</code></pre>
+
+    <h3>Signature Algorithms</h3>
+    <table class="algo-table">
+      <thead>
+        <tr><th>Algorithm</th><th>Key Size</th><th>Security Basis</th><th>Sig Size</th><th>Use Cases</th><th>Status</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>RSA-PKCS1v1.5</td>
+          <td>2048–4096 bit</td>
+          <td>Factoring</td>
+          <td>256–512 B</td>
+          <td>TLS certs (legacy), JWT RS256, HTTPS</td>
+          <td><span class="badge badge-warn">Legacy</span></td>
+        </tr>
+        <tr>
+          <td>RSA-PSS</td>
+          <td>2048–4096 bit</td>
+          <td>Factoring</td>
+          <td>256–512 B</td>
+          <td>Modern TLS certs, JWT PS256/384/512</td>
+          <td><span class="badge badge-green">Preferred over PKCS1</span></td>
+        </tr>
+        <tr>
+          <td>ECDSA (P-256)</td>
+          <td>256 bit</td>
+          <td>ECDLP</td>
+          <td>~64 B</td>
+          <td>TLS 1.3 certs, JWT ES256, code signing, TLS handshake auth</td>
+          <td><span class="badge badge-green">Recommended</span></td>
+        </tr>
+        <tr>
+          <td>ECDSA (P-384)</td>
+          <td>384 bit</td>
+          <td>ECDLP</td>
+          <td>~96 B</td>
+          <td>High-security TLS, government/FIPS systems</td>
+          <td><span class="badge badge-green">FIPS approved</span></td>
+        </tr>
+        <tr>
+          <td>Ed25519</td>
+          <td>255 bit</td>
+          <td>EdDSA / Curve25519</td>
+          <td>64 B</td>
+          <td>SSH keys, TLS 1.3, JWT EdDSA, GPG, WireGuard</td>
+          <td><span class="badge badge-green">Best Practice</span></td>
+        </tr>
+        <tr>
+          <td>Ed448</td>
+          <td>448 bit</td>
+          <td>EdDSA / Curve448</td>
+          <td>114 B</td>
+          <td>High-security applications, post-quantum transition period</td>
+          <td><span class="badge badge-green">High security</span></td>
+        </tr>
+        <tr>
+          <td>DSA</td>
+          <td>1024–3072 bit</td>
+          <td>Discrete log</td>
+          <td>~64 B</td>
+          <td>Legacy government systems</td>
+          <td><span class="badge badge-warn">Deprecated</span></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout callout-info">
+      <div class="icon">💡</div>
+      <div class="body">
+        <p><strong>Ed25519 vs ECDSA:</strong> Ed25519 (EdDSA) is deterministic — it never needs a random nonce, eliminating the catastrophic failure mode of ECDSA where reusing a nonce leaks the private key (the PS3 hack). Ed25519 is also faster to sign/verify.</p>
+      </div>
+    </div>
+
+    <h3>Hash Functions Used with Signatures</h3>
+    <div class="card-grid">
+      <div class="card">
+        <h4>SHA-256 <span class="badge badge-green">✓</span></h4>
+        <p>32-byte output. Used with RSA-PSS, ECDSA P-256. Standard for TLS certificates and most JWTs.</p>
+      </div>
+      <div class="card">
+        <h4>SHA-384 <span class="badge badge-green">✓</span></h4>
+        <p>48-byte output. Used with ECDSA P-384. Required for Suite B / NSA approved crypto.</p>
+      </div>
+      <div class="card">
+        <h4>SHA-512 <span class="badge badge-green">✓</span></h4>
+        <p>64-byte output. Used with RSA-PSS PS512. Strong, but slower on 32-bit systems.</p>
+      </div>
+      <div class="card">
+        <h4>SHA-1 <span class="badge badge-red">✗</span></h4>
+        <p>Collision attacks demonstrated (SHAttered 2017). Banned in TLS 1.3 certificates.</p>
+      </div>
+      <div class="card">
+        <h4>MD5 <span class="badge badge-red">✗</span></h4>
+        <p>Completely broken — collisions trivially computed. Never use for security purposes.</p>
+      </div>
+    </div>
+  </section>
+
+
+  <!-- ══════════════════════════════════════════════ -->
+  <!--  ELLIPTIC CURVES                               -->
+  <!-- ══════════════════════════════════════════════ -->
+  <section id="ecc">
+    <h2>
+      📈 Elliptic Curve Cryptography (ECC)
+      <span class="tag badge-purple">Compact & Fast</span>
+    </h2>
+
+    <p>
+      ECC exploits the algebraic structure of elliptic curves over finite fields. The security relies on the
+      <strong>Elliptic Curve Discrete Logarithm Problem (ECDLP)</strong>: given points <em>G</em> and
+      <em>Q = k·G</em>, it's computationally infeasible to find <em>k</em>.
+    </p>
+
+    <p>
+      A 256-bit ECC key provides comparable security to a 3072-bit RSA key — dramatically smaller
+      keys, faster operations, and less bandwidth.
+    </p>
+
+    <h3>Key Size Comparison: ECC vs RSA vs DH</h3>
+    <table class="algo-table">
+      <thead>
+        <tr><th>Security Level</th><th>AES</th><th>RSA / DH</th><th>ECC</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>80-bit</td><td>AES-80</td><td>1024 bit</td><td>160 bit</td></tr>
+        <tr><td>112-bit</td><td>AES-112</td><td>2048 bit</td><td>224 bit</td></tr>
+        <tr><td>128-bit</td><td>AES-128</td><td>3072 bit</td><td>256 bit</td></tr>
+        <tr><td>192-bit</td><td>AES-192</td><td>7680 bit</td><td>384 bit</td></tr>
+        <tr><td>256-bit</td><td>AES-256</td><td>15360 bit</td><td>521 bit</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Named Curves</h3>
+    <table class="algo-table">
+      <thead>
+        <tr><th>Curve</th><th>Standard</th><th>Key Size</th><th>Design</th><th>Use Cases</th><th>Status</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>P-256 (secp256r1)</td>
+          <td>NIST</td>
+          <td>256 bit</td>
+          <td>NIST random</td>
+          <td>TLS 1.3 default, HTTPS, code signing, FIDO2</td>
+          <td><span class="badge badge-green">Widely Supported</span></td>
+        </tr>
+        <tr>
+          <td>P-384 (secp384r1)</td>
+          <td>NIST</td>
+          <td>384 bit</td>
+          <td>NIST random</td>
+          <td>TLS high-security, NSA Suite B, government</td>
+          <td><span class="badge badge-green">FIPS approved</span></td>
+        </tr>
+        <tr>
+          <td>P-521 (secp521r1)</td>
+          <td>NIST</td>
+          <td>521 bit</td>
+          <td>NIST random</td>
+          <td>Highest-security NIST applications</td>
+          <td><span class="badge badge-blue">High security</span></td>
+        </tr>
+        <tr>
+          <td>Curve25519</td>
+          <td>IETF RFC 7748</td>
+          <td>255 bit</td>
+          <td>Montgomery (Bernstein)</td>
+          <td>X25519 key exchange, WireGuard, TLS 1.3, Signal Protocol</td>
+          <td><span class="badge badge-green">Best Practice</span></td>
+        </tr>
+        <tr>
+          <td>Curve448</td>
+          <td>IETF RFC 7748</td>
+          <td>448 bit</td>
+          <td>Edwards (Bernstein)</td>
+          <td>High-security key exchange, TLS 1.3</td>
+          <td><span class="badge badge-green">High security</span></td>
+        </tr>
+        <tr>
+          <td>secp256k1</td>
+          <td>SECG</td>
+          <td>256 bit</td>
+          <td>Koblitz</td>
+          <td>Bitcoin, Ethereum, blockchain applications</td>
+          <td><span class="badge badge-orange">Blockchain</span></td>
+        </tr>
+        <tr>
+          <td>brainpoolP256r1</td>
+          <td>BSI (German)</td>
+          <td>256 bit</td>
+          <td>Verifiably random</td>
+          <td>European government/banking systems</td>
+          <td><span class="badge badge-blue">Regional</span></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout callout-info">
+      <div class="icon">🔑</div>
+      <div class="body">
+        <p><strong>Curve25519 advantages:</strong> Designed to avoid potential NIST backdoors (concerns raised post-Snowden), constant-time implementation by construction (side-channel resistant), and the math is simpler and faster. Used in TLS 1.3 as <code>x25519</code> for ECDHE key exchange.</p>
+      </div>
+    </div>
+
+    <h3>ECC Algorithms Built on Curves</h3>
+    <div class="card-grid">
+      <div class="card">
+        <h4>ECDH / ECDHE</h4>
+        <p>Key agreement. The <em>E</em> in ECDHE means ephemeral — a new key per session, providing <strong>forward secrecy</strong>. Used in TLS 1.3.</p>
+      </div>
+      <div class="card">
+        <h4>ECDSA</h4>
+        <p>Elliptic Curve Digital Signature Algorithm. Requires a secure random nonce. Used in TLS certificates, JWT ES256/384/512, Bitcoin.</p>
+      </div>
+      <div class="card">
+        <h4>EdDSA (Ed25519)</h4>
+        <p>Edwards-curve Digital Signature Algorithm. Deterministic — no random nonce needed. Faster, safer, and smaller signatures than ECDSA.</p>
+      </div>
+      <div class="card">
+        <h4>X25519</h4>
+        <p>DH key exchange on Curve25519. Preferred TLS 1.3 key exchange method. <code>NamedGroup: x25519</code> in TLS extension.</p>
+      </div>
+    </div>
+  </section>
+
+
+  <!-- ══════════════════════════════════════════════ -->
+  <!--  DIFFIE-HELLMAN                                -->
+  <!-- ══════════════════════════════════════════════ -->
+  <section id="dh">
+    <h2>
+      🤝 Diffie-Hellman Key Exchange
+      <span class="tag badge-orange">Key Agreement</span>
+    </h2>
+
+    <p>
+      Diffie-Hellman (DH), published in 1976, was the first practical public-key protocol. It allows two parties
+      to establish a <strong>shared secret over an insecure channel</strong> without any prior shared information.
+      Neither party transmits the secret — they each contribute to computing it.
+    </p>
+
+    <h3>Classical DH — How It Works</h3>
+    <pre><code>Public parameters:  p (large prime),  g (generator)  ← shared openly
+
+Alice:  a  = random private integer
+        A  = g^a mod p   ← sends to Bob
+
+Bob:    b  = random private integer
+        B  = g^b mod p   ← sends to Alice
+
+Alice computes:  S = B^a mod p  = g^(ba) mod p
+Bob computes:    S = A^b mod p  = g^(ab) mod p
+
+S is the same shared secret — but neither a nor b was transmitted.</code></pre>
+
+    <div class="dh-diagram">
+      <div class="dh-box">
+        <div class="label">🧑 Alice</div>
+        <div class="sub">Private: <em>a</em></div>
+        <div class="sub">Sends: A = g<sup>a</sup> mod p</div>
+        <div class="sub">Computes: S = B<sup>a</sup> mod p</div>
+      </div>
+      <div class="arrow">
+        ⇄
+        <span>A, B exchanged over</span>
+        <span>insecure channel</span>
+      </div>
+      <div class="dh-box">
+        <div class="label">🧑‍💻 Bob</div>
+        <div class="sub">Private: <em>b</em></div>
+        <div class="sub">Sends: B = g<sup>b</sup> mod p</div>
+        <div class="sub">Computes: S = A<sup>b</sup> mod p</div>
+      </div>
+      <div class="arrow">
+        =
+        <span>Shared Secret S</span>
+        <span>g<sup>ab</sup> mod p</span>
+      </div>
+      <div class="dh-box" style="border-color: var(--accent2)">
+        <div class="label" style="color:var(--accent2)">✅ Shared</div>
+        <div class="sub">S = g<sup>ab</sup> mod p</div>
+        <div class="sub">Same on both sides</div>
+        <div class="sub">Never transmitted</div>
+      </div>
+    </div>
+
+    <h3>DH Variants</h3>
+    <table class="algo-table">
+      <thead>
+        <tr><th>Variant</th><th>Group</th><th>Key Size</th><th>Forward Secrecy</th><th>TLS Use</th><th>Status</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>DH (static)</td>
+          <td>Multiplicative group mod p</td>
+          <td>2048+ bit</td>
+          <td>No</td>
+          <td>Removed in TLS 1.3</td>
+          <td><span class="badge badge-warn">Avoid</span></td>
+        </tr>
+        <tr>
+          <td>DHE (ephemeral)</td>
+          <td>Multiplicative group mod p</td>
+          <td>2048+ bit</td>
+          <td>Yes</td>
+          <td>TLS 1.2 (ffdhe2048/4096)</td>
+          <td><span class="badge badge-blue">Legacy TLS 1.2</span></td>
+        </tr>
+        <tr>
+          <td>ECDH (static)</td>
+          <td>Elliptic curve</td>
+          <td>256+ bit</td>
+          <td>No</td>
+          <td>Removed in TLS 1.3</td>
+          <td><span class="badge badge-warn">Avoid</span></td>
+        </tr>
+        <tr>
+          <td>ECDHE (ephemeral)</td>
+          <td>Elliptic curve (P-256, X25519)</td>
+          <td>256+ bit</td>
+          <td>Yes ✅</td>
+          <td>TLS 1.3 mandatory</td>
+          <td><span class="badge badge-green">Recommended</span></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>Forward Secrecy (Perfect Forward Secrecy)</h3>
+    <p>
+      When using <strong>ephemeral</strong> keys (DHE / ECDHE), a unique DH key pair is generated for
+      every session. Even if the server's long-term private key is later compromised, past sessions
+      <strong>cannot be decrypted</strong> because the ephemeral keys were discarded.
+    </p>
+
+    <div class="callout callout-danger">
+      <div class="icon">⚠️</div>
+      <div class="body">
+        <p><strong>Logjam Attack (2015):</strong> Classical DH using 512-bit or 1024-bit groups can be broken via precomputation. Use DHE with 2048-bit groups (ffdhe2048) or prefer ECDHE with X25519.</p>
+      </div>
+    </div>
+
+    <h3>ECDHE in TLS 1.3 — The Math</h3>
+    <pre><code>-- Client --                                   -- Server --
+Generate ephemeral keypair:                    Generate ephemeral keypair:
+  client_private = random scalar a               server_private = random scalar b
+  client_public  = a × G  (on the curve)         server_public  = b × G
+
+Send client_public in ClientHello KeyShare  →
+                                             ←  Send server_public in ServerHello KeyShare
+
+Shared Secret:  S = a × server_public             S = b × client_public
+                  = a × (b × G)                     = b × (a × G)
+                  = (ab) × G   ← same point on curve for both
+
+S → HKDF → {client_handshake_key, server_handshake_key, ...}</code></pre>
+  </section>
+
+
+  <!-- ══════════════════════════════════════════════ -->
+  <!--  TLS                                           -->
+  <!-- ══════════════════════════════════════════════ -->
+  <section id="tls">
+    <h2>
+      🌐 TLS 1.3 — Algorithms in Practice
+      <span class="tag badge-green">Current Standard</span>
+    </h2>
+
+    <p>
+      TLS 1.3 (RFC 8446, 2018) drastically simplified the protocol by removing weak algorithms and mandating
+      forward secrecy. It uses <strong>ECDHE for key exchange</strong>, <strong>ECDSA/RSA/Ed25519 for
+      authentication</strong>, and <strong>AES-GCM / ChaCha20-Poly1305 for record encryption</strong>.
+    </p>
+
+    <h3>TLS 1.3 Cipher Suites</h3>
+    <table class="algo-table">
+      <thead>
+        <tr><th>Cipher Suite</th><th>AEAD Cipher</th><th>Hash (HKDF)</th><th>Notes</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>TLS_AES_128_GCM_SHA256</code></td>
+          <td>AES-128-GCM</td>
+          <td>SHA-256</td>
+          <td>Default — mandatory to implement</td>
+        </tr>
+        <tr>
+          <td><code>TLS_AES_256_GCM_SHA384</code></td>
+          <td>AES-256-GCM</td>
+          <td>SHA-384</td>
+          <td>High security</td>
+        </tr>
+        <tr>
+          <td><code>TLS_CHACHA20_POLY1305_SHA256</code></td>
+          <td>ChaCha20-Poly1305</td>
+          <td>SHA-256</td>
+          <td>Preferred for mobile / no AES-NI</td>
+        </tr>
+        <tr>
+          <td><code>TLS_AES_128_CCM_SHA256</code></td>
+          <td>AES-128-CCM</td>
+          <td>SHA-256</td>
+          <td>IoT / constrained environments</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>Note: Key exchange (<code>x25519</code>, <code>secp256r1</code>) and signature algorithm (ECDSA, RSA-PSS, Ed25519) are negotiated separately as extensions — they are <strong>not</strong> part of the cipher suite string in TLS 1.3.</p>
+
+    <h3>TLS 1.3 Handshake Flow</h3>
+    <div class="tls-flow">
+      <div class="tls-step">
+        <div class="num">1</div>
+        <div class="content">
+          <strong>Client → ClientHello</strong>
+          <p>Sends: supported cipher suites, TLS version, <code>key_share</code> (ephemeral ECDHE public key for x25519/P-256), <code>signature_algorithms</code>, <code>supported_groups</code></p>
+        </div>
+      </div>
+      <div class="tls-step">
+        <div class="num">2</div>
+        <div class="content">
+          <strong>Server → ServerHello</strong>
+          <p>Sends: chosen cipher suite, own <code>key_share</code> (ephemeral ECDHE public key). Both sides now compute the <strong>shared secret</strong> → derive <strong>handshake keys</strong> via HKDF.</p>
+        </div>
+      </div>
+      <div class="tls-step">
+        <div class="num">3</div>
+        <div class="content">
+          <strong>Server → {EncryptedExtensions + Certificate + CertificateVerify + Finished}</strong>
+          <p>All encrypted with handshake key. <code>CertificateVerify</code> contains a <strong>digital signature</strong> (RSA-PSS, ECDSA, or Ed25519) over the handshake transcript — proves server owns the private key matching the cert.</p>
+        </div>
+      </div>
+      <div class="tls-step">
+        <div class="num">4</div>
+        <div class="content">
+          <strong>Client → {Certificate (if mutual TLS) + CertificateVerify + Finished}</strong>
+          <p>Client verifies server cert chain → derives <strong>application traffic keys</strong> from HKDF. Finished messages use HMAC to verify the entire handshake transcript.</p>
+        </div>
+      </div>
+      <div class="tls-step">
+        <div class="num">5</div>
+        <div class="content">
+          <strong>Application Data (encrypted)</strong>
+          <p>All data encrypted with <strong>AES-GCM</strong> or <strong>ChaCha20-Poly1305</strong> using the derived application keys. Each record has a unique nonce derived from the sequence number + IV.</p>
+        </div>
+      </div>
+    </div>
+
+    <h3>What Each Algorithm Does in TLS 1.3</h3>
+    <div class="card-grid">
+      <div class="card">
+        <h4>ECDHE (X25519 / P-256)</h4>
+        <p><strong>Key Exchange.</strong> Establishes the shared secret. Ephemeral keys ensure forward secrecy — old sessions safe even if server key is compromised.</p>
+      </div>
+      <div class="card">
+        <h4>ECDSA / RSA-PSS / Ed25519</h4>
+        <p><strong>Authentication.</strong> Server (and optionally client) proves identity via signature in <code>CertificateVerify</code>. Prevents MITM attacks.</p>
+      </div>
+      <div class="card">
+        <h4>HKDF (with SHA-256/384)</h4>
+        <p><strong>Key Derivation.</strong> Derives multiple symmetric keys from the ECDHE shared secret: handshake keys, application keys, resumption secrets.</p>
+      </div>
+      <div class="card">
+        <h4>AES-128/256-GCM</h4>
+        <p><strong>Record Encryption.</strong> Encrypts + authenticates application data with AEAD. Prevents eavesdropping and tampering.</p>
+      </div>
+      <div class="card">
+        <h4>ChaCha20-Poly1305</h4>
+        <p><strong>Alternative AEAD.</strong> Software-efficient cipher for devices without AES hardware acceleration. Used in mobile TLS and QUIC.</p>
+      </div>
+      <div class="card">
+        <h4>X.509 Certificates</h4>
+        <p><strong>PKI / Trust Anchor.</strong> Bind the server's public key to its identity, signed by a trusted Certificate Authority.</p>
+      </div>
+    </div>
+
+    <div class="callout callout-green">
+      <div class="icon">✅</div>
+      <div class="body">
+        <p><strong>Removed in TLS 1.3:</strong> RSA key exchange, static DH/ECDH, RC4, DES, 3DES, MD5/SHA-1 in certs, CBC mode ciphers, compression, renegotiation. The protocol surface is now minimal and secure by default.</p>
+      </div>
+    </div>
+  </section>
+
+
+  <!-- ══════════════════════════════════════════════ -->
+  <!--  POST-QUANTUM                                  -->
+  <!-- ══════════════════════════════════════════════ -->
+  <section id="pq">
+    <h2>
+      ⚛️ Post-Quantum Cryptography (PQC)
+      <span class="tag badge-purple">NIST 2024 Standards</span>
+    </h2>
+
+    <p>
+      A sufficiently powerful quantum computer running <strong>Shor's algorithm</strong> can break all
+      RSA, DH, ECDH, and ECDSA — any algorithm based on integer factorization or discrete logarithms.
+      <strong>Grover's algorithm</strong> halves the effective key length of symmetric ciphers (AES-256 → 128-bit security).
+      Post-quantum algorithms are designed to resist both classical and quantum attacks.
+    </p>
+
+    <div class="callout callout-danger">
+      <div class="icon">☢️</div>
+      <div class="body">
+        <p><strong>"Harvest now, decrypt later" threat:</strong> Adversaries are collecting encrypted traffic today, planning to decrypt it once quantum computers mature. For long-lived sensitive data, PQC migration is urgent now — not later.</p>
+      </div>
+    </div>
+
+    <h3>NIST PQC Standards (Finalized 2024)</h3>
+
+    <div class="pq-card">
+      <h4>ML-KEM — FIPS 203 (formerly CRYSTALS-Kyber)</h4>
+      <p><strong>Type:</strong> Key Encapsulation Mechanism (KEM) — replaces ECDH / RSA key exchange</p>
+      <p><strong>Security basis:</strong> Module Learning With Errors (MLWE) — lattice-based hard problem</p>
+      <p><strong>Variants:</strong> ML-KEM-512 (~128-bit), ML-KEM-768 (~192-bit), ML-KEM-1024 (~256-bit)</p>
+      <p><strong>Performance:</strong> Fast — comparable to ECDH. Public key: ~1184 B. Ciphertext: ~1088 B (ML-KEM-768)</p>
+      <p><strong>Use cases:</strong> TLS 1.3 key exchange (hybrid X25519+ML-KEM), Signal Protocol, VPN, SSH</p>
+      <div style="margin-top:.6rem">
+        <span class="badge badge-green">NIST Standard</span>
+        <span class="badge badge-green">TLS Hybrid Proposed</span>
+        <span class="badge badge-purple">Lattice</span>
+      </div>
+    </div>
+
+    <div class="pq-card">
+      <h4>ML-DSA — FIPS 204 (formerly CRYSTALS-Dilithium)</h4>
+      <p><strong>Type:</strong> Digital Signature — replaces ECDSA / RSA-PSS</p>
+      <p><strong>Security basis:</strong> Module Learning With Errors (MLWE) — lattice-based</p>
+      <p><strong>Variants:</strong> ML-DSA-44 (~128-bit), ML-DSA-65 (~192-bit), ML-DSA-87 (~256-bit)</p>
+      <p><strong>Performance:</strong> Fast signing and verification. Sig size: ~2420–4595 B (larger than ECDSA's 64 B)</p>
+      <p><strong>Use cases:</strong> TLS 1.3 certificate signatures, code signing, document signing, PKI</p>
+      <div style="margin-top:.6rem">
+        <span class="badge badge-green">NIST Standard</span>
+        <span class="badge badge-purple">Lattice</span>
+      </div>
+    </div>
+
+    <div class="pq-card">
+      <h4>SLH-DSA — FIPS 205 (formerly SPHINCS+)</h4>
+      <p><strong>Type:</strong> Digital Signature — hash-based, conservative choice</p>
+      <p><strong>Security basis:</strong> Security of SHA-256 / SHAKE256 hash functions only</p>
+      <p><strong>Variants:</strong> SLH-DSA-SHA2-128s/f, SLH-DSA-SHAKE-256s/f (s=small sigs, f=fast)</p>
+      <p><strong>Performance:</strong> Slow signing (esp. -s variants). Sig size: 7856–49856 B. Verification is fast.</p>
+      <p><strong>Use cases:</strong> Long-lived root CA certificates, firmware signing, cases requiring conservative security assumptions</p>
+      <div style="margin-top:.6rem">
+        <span class="badge badge-green">NIST Standard</span>
+        <span class="badge badge-orange">Hash-based</span>
+        <span class="badge badge-blue">Conservative</span>
+      </div>
+    </div>
+
+    <div class="pq-card" style="border-left-color: var(--accent5)">
+      <h4>FN-DSA — FIPS 206 (formerly Falcon)</h4>
+      <p><strong>Type:</strong> Digital Signature — compact lattice-based</p>
+      <p><strong>Security basis:</strong> NTRU lattice, Short Integer Solution (SIS) problem</p>
+      <p><strong>Variants:</strong> Falcon-512 (~128-bit), Falcon-1024 (~256-bit)</p>
+      <p><strong>Performance:</strong> Very compact signatures (690 B / 1330 B) — much smaller than Dilithium</p>
+      <p><strong>Use cases:</strong> Bandwidth-constrained environments, IoT, blockchain, smart cards</p>
+      <div style="margin-top:.6rem">
+        <span class="badge badge-green">NIST Standard</span>
+        <span class="badge badge-purple">NTRU Lattice</span>
+        <span class="badge badge-blue">Compact</span>
+      </div>
+    </div>
+
+    <h3>Other Notable PQC Algorithms</h3>
+    <table class="algo-table">
+      <thead>
+        <tr><th>Algorithm</th><th>Type</th><th>Basis</th><th>Status</th><th>Notes</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>BIKE</td>
+          <td>KEM</td>
+          <td>QC-MDPC codes (code-based)</td>
+          <td><span class="badge badge-warn">NIST Round 4</span></td>
+          <td>Alternative to Kyber, code-based security</td>
+        </tr>
+        <tr>
+          <td>HQC</td>
+          <td>KEM</td>
+          <td>Hamming quasi-cyclic codes</td>
+          <td><span class="badge badge-warn">NIST Round 4</span></td>
+          <td>Conservative alternative KEM</td>
+        </tr>
+        <tr>
+          <td>XMSS / LMS</td>
+          <td>Signature</td>
+          <td>Hash-based (stateful)</td>
+          <td><span class="badge badge-green">NIST SP 800-208</span></td>
+          <td>Stateful — key state must be tracked. Firmware signing.</td>
+        </tr>
+        <tr>
+          <td>McEliece</td>
+          <td>KEM</td>
+          <td>Linear error-correcting codes</td>
+          <td><span class="badge badge-blue">NIST finalist</span></td>
+          <td>50-year-old hard problem — very large public keys (~1MB)</td>
+        </tr>
+        <tr>
+          <td>SIKE/SIDH</td>
+          <td>KEM</td>
+          <td>Supersingular isogeny</td>
+          <td><span class="badge badge-red">Broken 2022</span></td>
+          <td>Completely broken by Castryck-Decru attack</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>Hybrid TLS: Classical + Post-Quantum</h3>
+    <p>
+      During the transition, <strong>hybrid key exchange</strong> combines a classical algorithm
+      (e.g., X25519) with a PQC algorithm (ML-KEM-768). Both are run; the shared secrets are combined.
+      Security holds if either algorithm remains unbroken.
+    </p>
+    <pre><code>-- TLS 1.3 Hybrid Key Exchange --
+Client sends KeyShare:
+  X25519 public key  +  ML-KEM-768 public key  (in key_share extension)
+
+Server responds:
+  X25519 public key  +  ML-KEM-768 ciphertext
+
+Both sides compute:
+  SS_classical = X25519(priv, peer_pub)
+  SS_pqc       = ML-KEM-768.Decaps(priv, ciphertext)
+  shared_secret = HKDF-Expand(SS_classical || SS_pqc)
+
+Named group: X25519MLKEM768 (IANA assigned, RFC draft)</code></pre>
+
+    <div class="callout callout-green">
+      <div class="icon">🚀</div>
+      <div class="body">
+        <p><strong>Deployed today:</strong> Google Chrome, Cloudflare, and AWS already support <code>X25519MLKEM768</code> hybrid key exchange in production TLS. Go 1.23+ enables it by default. OpenSSL 3.5+ adds ML-KEM support.</p>
+      </div>
+    </div>
+  </section>
+
+
+  <!-- ══════════════════════════════════════════════ -->
+  <!--  COMPARISON                                    -->
+  <!-- ══════════════════════════════════════════════ -->
+  <section id="comparison">
+    <h2>
+      📊 Algorithm Comparison & Selection Guide
+    </h2>
+
+    <h3>What to Use — 2024 Recommendations</h3>
+    <table class="algo-table">
+      <thead>
+        <tr><th>Purpose</th><th>Recommended</th><th>Avoid</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Symmetric encryption</td>
+          <td>AES-256-GCM, ChaCha20-Poly1305</td>
+          <td>DES, 3DES, RC4, AES-CBC, AES-ECB</td>
+        </tr>
+        <tr>
+          <td>Asymmetric encryption / KEM</td>
+          <td>RSA-OAEP-2048+, ECIES, ML-KEM (PQC)</td>
+          <td>RSA PKCS#1 v1.5 encryption, ElGamal</td>
+        </tr>
+        <tr>
+          <td>Digital signatures</td>
+          <td>Ed25519, ECDSA P-256, RSA-PSS-2048</td>
+          <td>DSA, RSA-PKCS1v1.5 sig, MD5/SHA-1 sigs</td>
+        </tr>
+        <tr>
+          <td>TLS key exchange</td>
+          <td>X25519 (ECDHE), P-256 ECDHE, X25519MLKEM768</td>
+          <td>RSA key exchange, static DH, DH &lt;2048</td>
+        </tr>
+        <tr>
+          <td>TLS record cipher</td>
+          <td>AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305</td>
+          <td>RC4, 3DES, AES-CBC-SHA</td>
+        </tr>
+        <tr>
+          <td>Hash / HMAC</td>
+          <td>SHA-256, SHA-384, SHA-512, BLAKE2, SHA-3</td>
+          <td>MD5, SHA-1</td>
+        </tr>
+        <tr>
+          <td>Password hashing</td>
+          <td>Argon2id, bcrypt, scrypt</td>
+          <td>SHA-256 directly, MD5, unsalted hashes</td>
+        </tr>
+        <tr>
+          <td>Key derivation (KDF)</td>
+          <td>HKDF-SHA256, PBKDF2 (≥600k iter), Argon2</td>
+          <td>Direct hash, ECB-based KDF</td>
+        </tr>
+        <tr>
+          <td>PQ signatures (2025+)</td>
+          <td>ML-DSA-65 (Dilithium), FN-DSA (Falcon)</td>
+          <td>SIDH/SIKE (broken)</td>
+        </tr>
+        <tr>
+          <td>PQ key exchange (2025+)</td>
+          <td>ML-KEM-768 (Kyber), X25519+ML-KEM hybrid</td>
+          <td>SIKE (broken)</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>Security vs Performance</h3>
+    <div class="card-grid">
+      <div class="card">
+        <h4 style="color:var(--accent2)">Fastest</h4>
+        <p>AES-128-GCM (hardware), ChaCha20-Poly1305, Ed25519 verify, HMAC-SHA256</p>
+      </div>
+      <div class="card">
+        <h4 style="color:var(--accent)">Balanced</h4>
+        <p>ECDSA P-256, X25519 ECDHE, AES-256-GCM, RSA-PSS-2048 verify</p>
+      </div>
+      <div class="card">
+        <h4 style="color:var(--warn)">Slower</h4>
+        <p>RSA-4096 sign, ML-DSA (Dilithium) — larger PQ sigs, ML-KEM keygen</p>
+      </div>
+      <div class="card">
+        <h4 style="color:var(--danger)">Avoid</h4>
+        <p>RSA-1024, DES/3DES, SHA-1/MD5, SIKE, static DH, AES-ECB</p>
+      </div>
+    </div>
+
+    <h3>Threat Model Summary</h3>
+    <table class="algo-table">
+      <thead>
+        <tr><th>Threat</th><th>Vulnerable Algorithms</th><th>Resistant Algorithms</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Classical computer attack</td>
+          <td>DES (broken), RSA-512 (broken), MD5 collision</td>
+          <td>AES-256, RSA-2048+, ECDSA P-256, SHA-256</td>
+        </tr>
+        <tr>
+          <td>Shor's algorithm (quantum)</td>
+          <td>All RSA, DH, ECDH, ECDSA, DSA</td>
+          <td>AES-256 (halved → 128-bit), ML-KEM, ML-DSA, SLH-DSA</td>
+        </tr>
+        <tr>
+          <td>Grover's algorithm (quantum)</td>
+          <td>AES-128 (halved → 64-bit security)</td>
+          <td>AES-256 (128-bit security remains), SHA-384+</td>
+        </tr>
+        <tr>
+          <td>Side-channel attacks</td>
+          <td>ECDSA (nonce reuse), RSA (timing), CBC (padding oracle)</td>
+          <td>Ed25519 (deterministic), AES-GCM, constant-time X25519</td>
+        </tr>
+        <tr>
+          <td>Harvest-now decrypt-later</td>
+          <td>All current asymmetric (no forward secrecy + PQ)</td>
+          <td>X25519+ML-KEM hybrid, ECDHE (classical forward secrecy)</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+</div>
+
+<footer>
+  <p>Cryptographic Algorithms Reference — Covers NIST FIPS 140-3, TLS 1.3 (RFC 8446), NIST PQC 2024 Standards (FIPS 203/204/205/206)</p>
+  <p style="margin-top:.4rem">AES · ChaCha20 · RSA · ECDSA · Ed25519 · X25519 · Diffie-Hellman · ML-KEM · ML-DSA · SLH-DSA · FN-DSA</p>
+</footer>
+
+</body>
+</html>

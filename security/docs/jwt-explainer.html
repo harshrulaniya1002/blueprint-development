@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>JWT — How It Works</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --purple: #7c3aed;
+      --indigo: #4f46e5;
+      --pink:   #db2777;
+      --green:  #16a34a;
+      --red:    #dc2626;
+      --amber:  #d97706;
+      --bg:     #0f172a;
+      --surface:#1e293b;
+      --border: #334155;
+      --text:   #e2e8f0;
+      --muted:  #94a3b8;
+    }
+
+    body {
+      font-family: system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      padding: 2rem 1rem;
+    }
+
+    h1 { font-size: 2rem; text-align: center; margin-bottom: .4rem; }
+    .subtitle { text-align: center; color: var(--muted); margin-bottom: 3rem; }
+
+    section { max-width: 860px; margin: 0 auto 3rem; }
+    h2 {
+      font-size: 1.25rem;
+      margin-bottom: 1rem;
+      padding-bottom: .4rem;
+      border-bottom: 1px solid var(--border);
+      color: #a5b4fc;
+    }
+    p { color: var(--muted); margin-bottom: .75rem; }
+    strong { color: var(--text); }
+
+    /* ── JWT structure ── */
+    .jwt-bar {
+      display: flex;
+      gap: .5rem;
+      flex-wrap: wrap;
+      margin: 1.25rem 0;
+    }
+    .jwt-part {
+      flex: 1;
+      min-width: 180px;
+      border-radius: 8px;
+      padding: 1rem;
+    }
+    .jwt-part .label { font-size: .75rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; margin-bottom: .5rem; }
+    .jwt-part .value { font-family: monospace; font-size: .8rem; word-break: break-all; opacity: .85; }
+    .part-header    { background: #1d4ed8; }
+    .part-payload   { background: #15803d; }
+    .part-signature { background: #9333ea; }
+
+    .dot { color: var(--muted); font-size: 1.5rem; align-self: center; }
+
+    .decoded {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: .75rem;
+      margin-top: .75rem;
+    }
+    @media(max-width:600px){ .decoded { grid-template-columns: 1fr; } }
+
+    .box {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem;
+    }
+    .box .box-title { font-size: .75rem; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); margin-bottom: .6rem; }
+    pre { font-size: .8rem; color: #86efac; white-space: pre-wrap; }
+
+    /* ── HMAC diagram ── */
+    .hmac-flow {
+      display: flex;
+      flex-direction: column;
+      gap: .5rem;
+      margin: 1.25rem 0;
+    }
+    .hmac-row {
+      display: flex;
+      align-items: center;
+      gap: .75rem;
+      flex-wrap: wrap;
+    }
+    .hmac-box {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: .5rem .9rem;
+      font-size: .85rem;
+    }
+    .arrow { color: var(--muted); font-size: 1.2rem; }
+    .highlight { border-color: var(--purple); color: #c4b5fd; }
+    .result    { border-color: var(--green);  color: #86efac; }
+
+    /* ── Flow diagram ── */
+    .flow {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      position: relative;
+      margin: 1.25rem 0;
+    }
+    .flow-step {
+      display: flex;
+      gap: 1rem;
+      align-items: flex-start;
+      padding: .9rem 0;
+      border-left: 2px solid var(--border);
+      padding-left: 1.5rem;
+      position: relative;
+    }
+    .flow-step::before {
+      content: attr(data-n);
+      position: absolute;
+      left: -14px;
+      top: .85rem;
+      width: 26px;
+      height: 26px;
+      background: var(--indigo);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: .75rem;
+      font-weight: 700;
+    }
+    .flow-step .step-title { font-weight: 600; color: var(--text); }
+    .flow-step .step-desc  { font-size: .85rem; color: var(--muted); margin-top: .2rem; }
+
+    /* ── Token timeline ── */
+    .timeline {
+      position: relative;
+      height: 80px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      margin: 1.25rem 0;
+      overflow: hidden;
+    }
+    .tl-bar {
+      position: absolute;
+      top: 50%;
+      transform: translateY(-50%);
+      height: 28px;
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      padding: 0 .6rem;
+      font-size: .75rem;
+      font-weight: 600;
+    }
+    .tl-access  { left: 0; width: 20%; background: #1d4ed8; }
+    .tl-warn    { left: 17%; width: 3%;  background: var(--amber); opacity: .9; }
+    .tl-refresh { left: 0; width: 70%; background: #15803d; opacity: .35; border-radius: 4px; top: 70%; }
+    .tl-label {
+      position: absolute;
+      font-size: .7rem;
+      color: var(--muted);
+      top: 4px;
+    }
+
+    /* ── Stateless table ── */
+    table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+    th, td { padding: .6rem .85rem; text-align: left; border-bottom: 1px solid var(--border); }
+    th { color: var(--muted); font-weight: 600; }
+    td:first-child { color: var(--text); font-weight: 500; }
+    .yes { color: #4ade80; }
+    .no  { color: #f87171; }
+
+    /* ── Security callout ── */
+    .callout {
+      border-left: 3px solid;
+      border-radius: 0 6px 6px 0;
+      padding: .85rem 1rem;
+      margin: .75rem 0;
+      font-size: .88rem;
+    }
+    .callout-green  { border-color: var(--green);  background: #052e16; color: #86efac; }
+    .callout-red    { border-color: var(--red);    background: #2d0707; color: #fca5a5; }
+    .callout-amber  { border-color: var(--amber);  background: #2d1a00; color: #fcd34d; }
+  </style>
+</head>
+<body>
+
+<h1>How JWT Works</h1>
+<p class="subtitle">Access tokens · Refresh tokens · HMAC signing · Stateless auth</p>
+
+<!-- ── 1. STRUCTURE ── -->
+<section>
+  <h2>1 — JWT Structure</h2>
+  <p>A JWT is three <strong>Base64URL-encoded</strong> JSON objects joined by dots. Nothing is encrypted — it is <strong>signed</strong>, so the server can detect tampering.</p>
+
+  <div class="jwt-bar">
+    <div class="jwt-part part-header">
+      <div class="label">Header</div>
+      <div class="value">eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9</div>
+    </div>
+    <span class="dot">.</span>
+    <div class="jwt-part part-payload">
+      <div class="label">Payload</div>
+      <div class="value">eyJ1c2VybmFtZSI6InRlc3R1c2VyIiwiZXhwIjoxNzU0MDAwMDAwfQ</div>
+    </div>
+    <span class="dot">.</span>
+    <div class="jwt-part part-signature">
+      <div class="label">Signature</div>
+      <div class="value">SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c</div>
+    </div>
+  </div>
+
+  <div class="decoded">
+    <div class="box">
+      <div class="box-title" style="color:#93c5fd">Header (decoded)</div>
+      <pre>{
+  "alg": "HS256",
+  "typ": "JWT"
+}</pre>
+    </div>
+    <div class="box">
+      <div class="box-title" style="color:#86efac">Payload / Claims (decoded)</div>
+      <pre>{
+  "username": "testuser",
+  "iat": 1754000000,
+  "exp": 1754000030
+}</pre>
+    </div>
+    <div class="box">
+      <div class="box-title" style="color:#d8b4fe">Signature</div>
+      <pre>HMACSHA256(
+  base64(header) +
+  "." +
+  base64(payload),
+  SECRET
+)</pre>
+    </div>
+  </div>
+
+  <p style="margin-top:1rem">
+    The <strong>payload is readable by anyone</strong> — never store passwords or secrets in it.
+    The <strong>signature</strong> is what makes it trustworthy: only the server holding the secret key can produce or verify it.
+  </p>
+</section>
+
+<!-- ── 2. HMAC SIGNING ── -->
+<section>
+  <h2>2 — HMAC-SHA256 Signing</h2>
+  <p><strong>HMAC</strong> (Hash-based Message Authentication Code) uses a <strong>shared secret</strong> to both sign and verify a message. HS256 means HMAC with SHA-256.</p>
+
+  <div class="hmac-flow">
+    <p style="color:var(--muted); font-size:.85rem">Signing (at login):</p>
+    <div class="hmac-row">
+      <div class="hmac-box">base64(header) + "." + base64(payload)</div>
+      <span class="arrow">+</span>
+      <div class="hmac-box highlight">SECRET KEY</div>
+      <span class="arrow">→</span>
+      <div class="hmac-box">SHA-256 hash function</div>
+      <span class="arrow">→</span>
+      <div class="hmac-box result">Signature</div>
+    </div>
+
+    <p style="color:var(--muted); font-size:.85rem; margin-top:1rem">Verification (on every request):</p>
+    <div class="hmac-row">
+      <div class="hmac-box">Re-compute HMAC of incoming header + payload</div>
+      <span class="arrow">==?</span>
+      <div class="hmac-box result">Incoming signature</div>
+    </div>
+  </div>
+
+  <div class="callout callout-green">
+    ✅ If they match — the payload was not tampered with and was issued by someone who knows the secret.
+  </div>
+  <div class="callout callout-red">
+    ❌ If they differ — the payload was modified (e.g. someone changed <code>exp</code> to extend the token) — request is rejected.
+  </div>
+  <div class="callout callout-amber">
+    ⚠️ HS256 is <strong>symmetric</strong> — the same key signs and verifies. In a multi-service setup use RS256 (asymmetric) so only the auth server holds the private key.
+  </div>
+</section>
+
+<!-- ── 3. ACCESS + REFRESH TOKENS ── -->
+<section>
+  <h2>3 — Access Token vs Refresh Token</h2>
+
+  <table>
+    <thead>
+      <tr><th></th><th>Access Token</th><th>Refresh Token</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Purpose</td><td>Prove identity on each API call</td><td>Get a new access token without re-login</td></tr>
+      <tr><td>TTL</td><td>Short — 15 min (30 s in test)</td><td>Long — 7 days (2 min in test)</td></tr>
+      <tr><td>Sent to</td><td>Every protected API endpoint</td><td>Only <code>/refresh</code></td></tr>
+      <tr><td>Stored as</td><td><code>HttpOnly; Secure; SameSite=Strict</code> cookie</td><td>Same — scoped to <code>Path=/refresh</code></td></tr>
+      <tr><td>If stolen</td><td>Attacker has access for at most 15 min</td><td>Attacker can keep refreshing — guard it tightly</td></tr>
+      <tr><td>Revocable?</td><td class="no">No (stateless)</td><td class="yes">Yes (server-side store)</td></tr>
+    </tbody>
+  </table>
+
+  <p style="margin-top:1rem">The short access token TTL <strong>limits blast radius</strong>. Even if an access token leaks, it's useless within minutes. The refresh token is only ever sent to one endpoint and is rotated on every use.</p>
+
+  <p style="margin-top:.5rem"><strong>Token rotation</strong> — every <code>POST /refresh</code> invalidates the old refresh token and issues a new one. If the old token is used again, the server detects reuse and rejects it.</p>
+</section>
+
+<!-- ── 4. TIMELINE ── -->
+<section>
+  <h2>4 — Token Lifetime Timeline</h2>
+  <div class="timeline">
+    <div class="tl-label" style="left:1%">t=0 login</div>
+    <div class="tl-label" style="left:17%">~27s warn</div>
+    <div class="tl-label" style="left:20%">30s expired</div>
+    <div class="tl-label" style="left:70%">2min refresh expires</div>
+
+    <div class="tl-bar tl-refresh" style="top:unset; bottom:0; height:100%; z-index:0"></div>
+    <div class="tl-bar tl-access" style="z-index:1">access (30 s)</div>
+    <div class="tl-bar tl-warn"   style="z-index:1"></div>
+  </div>
+  <p style="font-size:.8rem">
+    <span style="color:#93c5fd">■</span> Access token window &nbsp;
+    <span style="color:var(--amber)">■</span> "expiring soon" warning zone (last 3 s) &nbsp;
+    <span style="color:#4ade80">■</span> Refresh token window
+  </p>
+</section>
+
+<!-- ── 5. FULL FLOW ── -->
+<section>
+  <h2>5 — Full Auth Flow</h2>
+  <div class="flow">
+    <div class="flow-step" data-n="1">
+      <div>
+        <div class="step-title">POST /login</div>
+        <div class="step-desc">Client sends <code>username + password</code>. Server validates, generates access + refresh tokens, sets both as <strong>HttpOnly cookies</strong>. Redirects to <code>/profile</code>.</div>
+      </div>
+    </div>
+    <div class="flow-step" data-n="2">
+      <div>
+        <div class="step-title">GET /api/profile (protected)</div>
+        <div class="step-desc">Browser automatically sends the <code>access_token</code> cookie. Middleware validates the JWT signature and expiry. If valid, injects <code>username</code> into request context.</div>
+      </div>
+    </div>
+    <div class="flow-step" data-n="3">
+      <div>
+        <div class="step-title">token_expiring_soon: true</div>
+        <div class="step-desc">Server sees the token expires within 3 minutes and includes this flag in the JSON response. The client JS calls <code>POST /refresh</code> proactively — user never notices.</div>
+      </div>
+    </div>
+    <div class="flow-step" data-n="4">
+      <div>
+        <div class="step-title">POST /refresh</div>
+        <div class="step-desc">Browser sends the <code>refresh_token</code> cookie (scoped to this path only). Server validates it, checks the in-memory store, generates a new pair, sets new cookies, and invalidates the old refresh token.</div>
+      </div>
+    </div>
+    <div class="flow-step" data-n="5">
+      <div>
+        <div class="step-title">Access token expired, refresh also expired</div>
+        <div class="step-desc"><code>/api/profile</code> returns <code>401</code>. Client redirects to <code>/login</code>. User must authenticate again.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── 6. STATELESS ── -->
+<section>
+  <h2>6 — Why Stateless?</h2>
+  <p>Traditional <strong>session-based auth</strong> stores a session ID in a database. Every request requires a DB lookup to check if the session is valid. JWT flips this:</p>
+
+  <table style="margin:1rem 0">
+    <thead>
+      <tr><th></th><th>Session (stateful)</th><th>JWT (stateless)</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Server stores</td><td>Session record in DB / Redis</td><td>Nothing (only the signing secret)</td></tr>
+      <tr><td>Verification cost</td><td>DB round-trip on every request</td><td>CPU-only HMAC verification</td></tr>
+      <tr><td>Horizontal scaling</td><td>All servers share the same session store</td><td>Any server can verify — no shared state</td></tr>
+      <tr><td>Revocation</td><td class="yes">Instant — delete session row</td><td class="no">Must wait for expiry (or use a deny-list)</td></tr>
+      <tr><td>Works across services</td><td class="no">Session store must be accessible</td><td class="yes">Any service with the public key can verify</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-green">
+    ✅ Stateless = the token itself <em>is</em> the proof of identity. The server trusts the math, not a database record.
+  </div>
+  <div class="callout callout-amber">
+    ⚠️ The tradeoff: you cannot instantly revoke an access token. Short TTLs (15 min) + refresh token rotation are the standard mitigations.
+  </div>
+</section>
+
+<!-- ── 7. COOKIE SECURITY ── -->
+<section>
+  <h2>7 — Why HttpOnly Cookies Beat localStorage</h2>
+  <table>
+    <thead>
+      <tr><th>Attack</th><th>localStorage</th><th>HttpOnly Cookie</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>XSS (injected script reads token)</td><td class="no">❌ Vulnerable — <code>localStorage.getItem()</code></td><td class="yes">✅ JS cannot read HttpOnly cookies</td></tr>
+      <tr><td>CSRF (cross-site request forgery)</td><td class="yes">✅ Not sent automatically</td><td>Mitigated by <code>SameSite=Strict</code></td></tr>
+      <tr><td>Network sniffing</td><td class="no">❌ If served over HTTP</td><td class="yes">✅ <code>Secure</code> flag — HTTPS only</td></tr>
+      <tr><td>JS access needed?</td><td>Yes</td><td class="yes">No — browser handles it transparently</td></tr>
+    </tbody>
+  </table>
+</section>
+
+</body>
+</html>

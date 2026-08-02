@@ -1,0 +1,51 @@
+******************************************************
+-BASH Command: for RSA Certificate generation
+
+openssl req -x509 -newkey rsa:2048 -nodes \
+-keyout key.pem \
+-out cert.pem \
+-days 365
+
+******************************************************
+-BASH Command: for ecdsa Certificate generation
+
+# Generate private key
+openssl ecparam -name prime256v1 -genkey -noout -out ecdsa.key
+
+# Generate certificate
+openssl req -new -x509 \
+-key ecdsa.key \
+-out ecdsa.crt \
+-days 365
+
+******************************************************
+-BASH Command: for Ed25519 Certificate generation
+
+openssl genpkey -algorithm Ed25519 -out ed25519.key
+
+openssl req -new -x509 \
+-key ed25519.key \
+-out ed25519.crt \
+-days 365
+
+******************************************************
+// for checking which algo used to generate the Certificate
+openssl x509 -in certs/rsa_certs/cert.pem -text -noout
+
+******************************************************
+CA-SIGNED CERTIFICATES (not self-signed) — FIPS compliant
+
+Run the script:
+  cd certs && bash generate_ca_signed_certs.sh
+
+This creates:
+  ca/ca.crt + ca/ca.key             — Root CA (RSA 4096, SHA-256)
+  server/server.crt + server.key    — Server cert signed by CA
+  client/client.crt + client.key    — Client cert signed by CA (for mTLS)
+
+To run Go app in FIPS 140-3 mode:
+  GODEBUG=fips140=only go run main_postgres_tls.go
+
+******************************************************
+
+& "C:\Program Files\PostgreSQL\16\bin\psql.exe" -U postgres -c "SHOW ssl;"

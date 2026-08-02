@@ -1,0 +1,713 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TLS 1.3 — Complete End-to-End Flow</title>
+<style>
+  :root {
+    --client: #3b82f6;
+    --server: #10b981;
+    --shared: #f59e0b;
+    --danger: #ef4444;
+    --bg: #0f172a;
+    --card: #1e293b;
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --border: #334155;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); line-height: 1.6; }
+
+  /* NAV */
+  nav { position: sticky; top: 0; z-index: 100; background: rgba(15,23,42,.92); backdrop-filter: blur(12px); border-bottom: 1px solid var(--border); padding: 12px 32px; display: flex; gap: 16px; flex-wrap: wrap; align-items: center; }
+  nav a { color: var(--muted); text-decoration: none; font-size: 14px; padding: 4px 10px; border-radius: 6px; transition: .2s; }
+  nav a:hover, nav a.active { color: #fff; background: var(--border); }
+  nav .logo { font-weight: 700; font-size: 18px; color: var(--client); margin-right: auto; letter-spacing: -0.5px; }
+
+  /* SECTIONS */
+  section { max-width: 1100px; margin: 0 auto; padding: 60px 24px 40px; }
+  h1 { font-size: 2.4rem; margin-bottom: 8px; }
+  h2 { font-size: 1.6rem; margin-bottom: 16px; color: var(--shared); border-bottom: 2px solid var(--border); padding-bottom: 8px; }
+  h3 { font-size: 1.15rem; margin: 16px 0 8px; color: var(--client); }
+  p, li { color: var(--text); font-size: 15px; }
+  ul { padding-left: 20px; margin-bottom: 12px; }
+  li { margin-bottom: 4px; }
+  code { background: #0d1117; padding: 2px 6px; border-radius: 4px; font-size: 13px; color: #7dd3fc; }
+  .subtitle { color: var(--muted); font-size: 1.05rem; margin-bottom: 32px; }
+
+  /* CARDS */
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 24px; margin-bottom: 20px; }
+  .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; margin-bottom: 20px; }
+
+  /* COMPARISON TABLE */
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 14px; }
+  th, td { padding: 10px 14px; text-align: left; border: 1px solid var(--border); }
+  th { background: var(--border); color: #fff; }
+  td { background: var(--card); }
+  tr:hover td { background: #253249; }
+
+  /* FLOW DIAGRAM */
+  .flow { position: relative; margin: 32px 0; }
+  .flow-header { display: grid; grid-template-columns: 1fr 200px 1fr; text-align: center; font-weight: 700; font-size: 15px; margin-bottom: 8px; }
+  .flow-header .col-client { color: var(--client); }
+  .flow-header .col-server { color: var(--server); }
+  .flow-header .col-mid { color: var(--muted); font-size: 12px; }
+
+  .flow-row { display: grid; grid-template-columns: 1fr 200px 1fr; align-items: center; min-height: 52px; position: relative; }
+  .flow-row .col { padding: 8px 12px; font-size: 13px; }
+  .flow-row .col-left { text-align: right; }
+  .flow-row .col-right { text-align: left; }
+
+  .arrow-container { display: flex; align-items: center; justify-content: center; position: relative; }
+  .arrow-right, .arrow-left { height: 2px; width: 100%; position: relative; }
+  .arrow-right { background: linear-gradient(90deg, var(--client), var(--server)); }
+  .arrow-right::after { content: '▶'; position: absolute; right: -6px; top: -9px; color: var(--server); font-size: 14px; }
+  .arrow-left { background: linear-gradient(90deg, var(--server), var(--client)); }
+  .arrow-left::after { content: '◀'; position: absolute; left: -6px; top: -9px; color: var(--server); font-size: 14px; }
+
+  .arrow-label { position: absolute; top: -18px; width: 100%; text-align: center; font-size: 11px; color: var(--shared); font-weight: 600; white-space: nowrap; }
+
+  .flow-divider { grid-column: 1 / -1; border-top: 1px dashed var(--border); margin: 8px 0; position: relative; }
+  .flow-divider span { position: absolute; top: -10px; left: 50%; transform: translateX(-50%); background: var(--bg); padding: 0 12px; color: var(--shared); font-size: 12px; font-weight: 700; white-space: nowrap; }
+
+  .timeline-line { position: absolute; top: 0; bottom: 0; width: 2px; }
+  .tl-client { left: calc(50% - 100px - 1px); background: var(--client); opacity: .25; }
+  .tl-server { left: calc(50% + 100px - 1px); background: var(--server); opacity: .25; }
+
+  /* CIPHER BOX */
+  .cipher-box { display: inline-block; background: #1a1a2e; border: 1px solid var(--shared); border-radius: 8px; padding: 10px 16px; margin: 4px; font-size: 13px; }
+  .cipher-box .name { font-weight: 700; color: var(--shared); }
+  .cipher-box .desc { color: var(--muted); font-size: 12px; }
+
+  /* CERT CHAIN */
+  .cert-chain { display: flex; flex-direction: column; align-items: center; gap: 0; margin: 20px 0; }
+  .cert-node { background: var(--card); border: 2px solid var(--server); border-radius: 10px; padding: 14px 24px; text-align: center; min-width: 260px; position: relative; }
+  .cert-node.root { border-color: var(--danger); }
+  .cert-node.intermediate { border-color: var(--shared); }
+  .cert-node .label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 4px; }
+  .cert-node.root .label { color: var(--danger); }
+  .cert-node.intermediate .label { color: var(--shared); }
+  .cert-node .label { color: var(--server); }
+  .cert-connector { width: 2px; height: 28px; background: var(--border); }
+  .cert-connector-label { font-size: 11px; color: var(--muted); margin: 2px 0; }
+
+  /* KEY EXCHANGE VIZ */
+  .kx-viz { display: grid; grid-template-columns: 1fr 80px 1fr; gap: 0; align-items: center; text-align: center; margin: 24px 0; }
+  .kx-box { background: var(--card); border-radius: 10px; padding: 16px; border: 1px solid var(--border); }
+  .kx-box h4 { margin-bottom: 8px; font-size: 14px; }
+  .kx-arrow { font-size: 24px; color: var(--shared); }
+  .kx-result { grid-column: 1 / -1; margin-top: 12px; background: linear-gradient(90deg, rgba(59,130,246,.15), rgba(16,185,129,.15)); border: 1px solid var(--shared); border-radius: 10px; padding: 14px; }
+
+  /* BADGE */
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; }
+  .badge-client { background: rgba(59,130,246,.2); color: var(--client); }
+  .badge-server { background: rgba(16,185,129,.2); color: var(--server); }
+  .badge-shared { background: rgba(245,158,11,.2); color: var(--shared); }
+  .badge-danger { background: rgba(239,68,68,.2); color: var(--danger); }
+
+  /* TOOLTIP */
+  .tip { position: relative; cursor: help; border-bottom: 1px dotted var(--muted); }
+  .tip:hover::after { content: attr(data-tip); position: absolute; bottom: 120%; left: 50%; transform: translateX(-50%); background: #000; color: #fff; padding: 6px 10px; border-radius: 6px; font-size: 12px; white-space: nowrap; z-index: 10; }
+
+  /* TABS */
+  .tabs { display: flex; gap: 4px; margin-bottom: 16px; }
+  .tab-btn { background: var(--border); color: var(--muted); border: none; padding: 8px 16px; border-radius: 8px 8px 0 0; cursor: pointer; font-size: 13px; }
+  .tab-btn.active { background: var(--card); color: #fff; }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  /* ANIMATION */
+  @keyframes fadeSlideUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+  .animate { animation: fadeSlideUp .5s ease forwards; opacity: 0; }
+
+  /* SCROLL SPY HIGHLIGHT */
+  .highlight-section { border-left: 3px solid var(--shared); padding-left: 16px; }
+
+  /* RESPONSIVE */
+  @media (max-width: 700px) {
+    .flow-row { grid-template-columns: 1fr 100px 1fr; }
+    .card-grid { grid-template-columns: 1fr; }
+    h1 { font-size: 1.6rem; }
+  }
+</style>
+</head>
+<body>
+
+<!-- NAVIGATION -->
+<nav id="topnav">
+  <span class="logo">🔒 TLS 1.3</span>
+  <a href="#overview">Overview</a>
+  <a href="#comparison">vs TLS 1.2</a>
+  <a href="#cipher-suites">Cipher Suites</a>
+  <a href="#key-exchange">Key Exchange</a>
+  <a href="#certificates">Certificates</a>
+  <a href="#full-handshake">Full Handshake</a>
+  <a href="#0rtt">0-RTT</a>
+  <a href="#app-data">App Data</a>
+</nav>
+
+<!-- 1. OVERVIEW -->
+<section id="overview">
+  <h1>TLS 1.3 — Complete End-to-End Flow</h1>
+  <p class="subtitle">How your browser and server establish a secure, authenticated, encrypted channel in just <strong>1 round-trip</strong>.</p>
+
+  <div class="card-grid">
+    <div class="card animate">
+      <h3>🔑 Key Exchange</h3>
+      <p>Ephemeral Diffie-Hellman (ECDHE / DHE) only. RSA key transport is <strong>removed</strong> — guaranteeing forward secrecy for every connection.</p>
+    </div>
+    <div class="card animate">
+      <h3>🛡️ Authentication</h3>
+      <p>Server proves identity via an X.509 certificate chain signed with RSA or ECDSA. Client optionally authenticates too (mutual TLS).</p>
+    </div>
+    <div class="card animate">
+      <h3>⚡ Performance</h3>
+      <p>Full handshake completes in <strong>1-RTT</strong> (vs 2-RTT in TLS 1.2). Resumed sessions can send data in <strong>0-RTT</strong>.</p>
+    </div>
+    <div class="card animate">
+      <h3>🧹 Simplified Design</h3>
+      <p>Removed insecure algorithms (RC4, 3DES, SHA-1, static RSA, CBC-mode ciphers, compression). Only 5 cipher suites remain.</p>
+    </div>
+  </div>
+</section>
+
+<!-- 2. TLS 1.2 vs 1.3 -->
+<section id="comparison">
+  <h2>TLS 1.2 vs TLS 1.3</h2>
+  <table>
+    <thead><tr><th>Feature</th><th>TLS 1.2</th><th>TLS 1.3</th></tr></thead>
+    <tbody>
+      <tr><td>Handshake round-trips</td><td>2-RTT</td><td><strong>1-RTT</strong> (0-RTT resumption)</td></tr>
+      <tr><td>Key exchange</td><td>RSA, DHE, ECDHE</td><td><strong>ECDHE / DHE only</strong> (forward secrecy mandatory)</td></tr>
+      <tr><td>Cipher suites</td><td>~37 (many insecure)</td><td><strong>5</strong> (all AEAD)</td></tr>
+      <tr><td>Handshake encryption</td><td>Plaintext until Finished</td><td><strong>Encrypted after ServerHello</strong></td></tr>
+      <tr><td>Renegotiation</td><td>Supported (attack vector)</td><td><strong>Removed</strong></td></tr>
+      <tr><td>Compression</td><td>Supported (CRIME attack)</td><td><strong>Removed</strong></td></tr>
+      <tr><td>Session resumption</td><td>Session IDs / Tickets</td><td><strong>PSK-based (with optional 0-RTT)</strong></td></tr>
+      <tr><td>Removed algorithms</td><td>—</td><td>RC4, 3DES, MD5, SHA-1, CBC, static RSA, DH export</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- 3. CIPHER SUITES -->
+<section id="cipher-suites">
+  <h2>TLS 1.3 Cipher Suites</h2>
+  <div class="card">
+    <h3>How Cipher Suite Selection Works</h3>
+    <p>In TLS 1.3, cipher suites <strong>only specify the symmetric encryption + hash</strong>. Key exchange (always ECDHE/DHE) and signature algorithms are negotiated <em>separately</em> via extensions.</p>
+    <ol style="margin: 12px 0 12px 20px;">
+      <li><span class="badge badge-client">Client</span> sends a list of supported cipher suites in <code>ClientHello</code>, ordered by preference.</li>
+      <li><span class="badge badge-client">Client</span> also sends <code>supported_groups</code> (e.g. x25519, secp256r1) and <code>signature_algorithms</code> (e.g. ecdsa_secp256r1_sha256) extensions.</li>
+      <li><span class="badge badge-server">Server</span> picks <strong>one</strong> cipher suite from the intersection, respecting its own preference order.</li>
+      <li><span class="badge badge-server">Server</span> independently selects a key-share group and signature algorithm.</li>
+      <li>If no common cipher suite exists → <span class="badge badge-danger">handshake_failure</span> alert.</li>
+    </ol>
+  </div>
+
+  <h3>The 5 Defined Cipher Suites</h3>
+  <div style="display:flex; flex-wrap:wrap; gap:8px; margin: 12px 0;">
+    <div class="cipher-box"><span class="name">TLS_AES_128_GCM_SHA256</span><br><span class="desc">AES-128 in GCM mode, SHA-256 — most widely used</span></div>
+    <div class="cipher-box"><span class="name">TLS_AES_256_GCM_SHA384</span><br><span class="desc">AES-256 in GCM mode, SHA-384 — higher security margin</span></div>
+    <div class="cipher-box"><span class="name">TLS_CHACHA20_POLY1305_SHA256</span><br><span class="desc">ChaCha20-Poly1305, SHA-256 — fast on mobile/ARM (no AES-NI)</span></div>
+    <div class="cipher-box"><span class="name">TLS_AES_128_CCM_SHA256</span><br><span class="desc">AES-128 in CCM mode — for constrained IoT devices</span></div>
+    <div class="cipher-box"><span class="name">TLS_AES_128_CCM_8_SHA256</span><br><span class="desc">AES-128 CCM with 8-byte tag — minimal IoT overhead</span></div>
+  </div>
+
+  <div class="card" style="margin-top: 16px;">
+    <h3>Cipher Suite Format Change</h3>
+    <table>
+      <thead><tr><th></th><th>TLS 1.2 Format</th><th>TLS 1.3 Format</th></tr></thead>
+      <tbody>
+        <tr><td>Example</td><td><code>TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256</code></td><td><code>TLS_AES_128_GCM_SHA256</code></td></tr>
+        <tr><td>Specifies key exchange?</td><td>Yes (ECDHE)</td><td>No (always ECDHE/DHE)</td></tr>
+        <tr><td>Specifies auth?</td><td>Yes (RSA)</td><td>No (via <code>signature_algorithms</code> ext.)</td></tr>
+        <tr><td>Specifies encryption</td><td>Yes</td><td>Yes</td></tr>
+        <tr><td>Specifies hash</td><td>Yes</td><td>Yes</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- 4. KEY EXCHANGE (ECDHE) -->
+<section id="key-exchange">
+  <h2>Key Exchange — Ephemeral ECDHE</h2>
+
+  <div class="kx-viz">
+    <div class="kx-box" style="border-color: var(--client);">
+      <h4 style="color:var(--client)">👤 Client</h4>
+      <p style="font-size:13px">Generates ephemeral key pair:<br>
+        <code>client_private</code> (secret)<br>
+        <code>client_public = client_private × G</code>
+      </p>
+      <p style="font-size:12px; color:var(--muted); margin-top:8px;">Sends <code>client_public</code> in ClientHello <code>key_share</code> extension</p>
+    </div>
+    <div class="kx-arrow">⇄</div>
+    <div class="kx-box" style="border-color: var(--server);">
+      <h4 style="color:var(--server)">🖥️ Server</h4>
+      <p style="font-size:13px">Generates ephemeral key pair:<br>
+        <code>server_private</code> (secret)<br>
+        <code>server_public = server_private × G</code>
+      </p>
+      <p style="font-size:12px; color:var(--muted); margin-top:8px;">Sends <code>server_public</code> in ServerHello <code>key_share</code> extension</p>
+    </div>
+    <div class="kx-result">
+      <strong style="color:var(--shared)">Shared Secret Computation (both sides independently):</strong><br>
+      <code style="font-size:14px;">shared_secret = ECDH(my_private, their_public)</code><br><br>
+      <span style="font-size:13px;">
+        Then: <code>shared_secret</code>
+        → <strong>HKDF-Extract</strong> → <code>Early Secret</code>
+        → <strong>Derive-Secret</strong> → <code>Handshake Secret</code>
+        → <strong>Derive-Secret</strong> → <code>Master Secret</code><br>
+        → <code>client_handshake_traffic_secret</code> + <code>server_handshake_traffic_secret</code><br>
+        → <code>client_application_traffic_secret</code> + <code>server_application_traffic_secret</code>
+      </span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Key Schedule (HKDF-based)</h3>
+    <pre style="background:#0d1117; padding:16px; border-radius:8px; overflow-x:auto; font-size:13px; color:#7dd3fc; line-height:1.7;">
+             0
+             │
+             ▼
+   PSK ──► HKDF-Extract = <span style="color:#f59e0b">Early Secret</span>
+             │
+             ├─► Derive-Secret(., "ext binder", "")
+             ├─► Derive-Secret(., "res binder", "")
+             ├─► Derive-Secret(., "c e traffic", ClientHello)
+             ├─► Derive-Secret(., "e exp master", ClientHello)
+             │
+             ▼
+   Derive-Secret(., "derived", "")
+             │
+             ▼
+   ECDHE ─► HKDF-Extract = <span style="color:#f59e0b">Handshake Secret</span>
+             │
+             ├─► Derive-Secret(., "c hs traffic", ClientHello...ServerHello)
+             │       = <span style="color:#3b82f6">client_handshake_traffic_secret</span>
+             ├─► Derive-Secret(., "s hs traffic", ClientHello...ServerHello)
+             │       = <span style="color:#10b981">server_handshake_traffic_secret</span>
+             │
+             ▼
+   Derive-Secret(., "derived", "")
+             │
+             ▼
+   0 ──────► HKDF-Extract = <span style="color:#f59e0b">Master Secret</span>
+             │
+             ├─► Derive-Secret(., "c ap traffic", ClientHello...server Finished)
+             │       = <span style="color:#3b82f6">client_application_traffic_secret_0</span>
+             ├─► Derive-Secret(., "s ap traffic", ClientHello...server Finished)
+             │       = <span style="color:#10b981">server_application_traffic_secret_0</span>
+             ├─► Derive-Secret(., "exp master", ClientHello...server Finished)
+             └─► Derive-Secret(., "res master", ClientHello...client Finished)
+    </pre>
+  </div>
+</section>
+
+<!-- 5. CERTIFICATES & AUTHENTICATION -->
+<section id="certificates">
+  <h2>Certificates &amp; Authentication</h2>
+
+  <div class="card">
+    <h3>Certificate Chain of Trust</h3>
+    <p>The server sends its certificate chain. The client validates each certificate's signature up to a trusted root CA in its trust store.</p>
+  </div>
+
+  <div class="cert-chain">
+    <div class="cert-node root">
+      <div class="label">Root CA (Trust Anchor)</div>
+      <strong>e.g., DigiCert Global Root G2</strong>
+      <p style="font-size:12px; color:var(--muted);">Self-signed · Pre-installed in OS/browser trust store<br>NOT sent by server (client already has it)</p>
+    </div>
+    <div class="cert-connector"></div>
+    <div class="cert-connector-label">Signs ▼</div>
+    <div class="cert-node intermediate">
+      <div class="label">Intermediate CA</div>
+      <strong>e.g., DigiCert SHA2 Extended Validation Server CA</strong>
+      <p style="font-size:12px; color:var(--muted);">Signed by Root CA · Sent by server in Certificate message</p>
+    </div>
+    <div class="cert-connector"></div>
+    <div class="cert-connector-label">Signs ▼</div>
+    <div class="cert-node">
+      <div class="label">Leaf / End-Entity Certificate</div>
+      <strong>e.g., CN=www.example.com</strong>
+      <p style="font-size:12px; color:var(--muted);">Contains server's public key · Signed by Intermediate CA<br>Matches requested hostname (SNI)</p>
+    </div>
+  </div>
+
+  <div class="card-grid" style="margin-top: 20px;">
+    <div class="card">
+      <h3>Server Authentication Steps</h3>
+      <ol style="padding-left:18px; font-size:14px;">
+        <li><strong>Certificate message</strong>: Server sends leaf cert + intermediates (encrypted under handshake keys).</li>
+        <li><strong>CertificateVerify message</strong>: Server signs a hash of the entire handshake transcript with its <em>private key</em>.</li>
+        <li><strong>Client validates</strong>:
+          <ul>
+            <li>Certificate chain → trusted root CA</li>
+            <li>Hostname matches cert's SAN/CN</li>
+            <li>Certificate not expired / not revoked (OCSP)</li>
+            <li>CertificateVerify signature valid (proves server holds private key)</li>
+          </ul>
+        </li>
+        <li><strong>Finished message</strong>: Server sends HMAC over entire transcript — confirms it derived the same keys.</li>
+      </ol>
+    </div>
+    <div class="card">
+      <h3>Why CertificateVerify Matters</h3>
+      <p>In TLS 1.2, the server's RSA key exchange implicitly proved key ownership. Since TLS 1.3 uses <strong>only ephemeral DH</strong>, the server must <em>explicitly</em> prove it owns the certificate's private key by signing the handshake transcript.</p>
+      <br>
+      <h3>Signature Algorithms (negotiated separately)</h3>
+      <ul style="font-size:13px;">
+        <li><code>ecdsa_secp256r1_sha256</code></li>
+        <li><code>ecdsa_secp384r1_sha384</code></li>
+        <li><code>rsa_pss_rsae_sha256</code></li>
+        <li><code>rsa_pss_rsae_sha384</code></li>
+        <li><code>ed25519</code> / <code>ed448</code></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- 6. FULL HANDSHAKE FLOW -->
+<section id="full-handshake">
+  <h2>Full 1-RTT Handshake Flow</h2>
+  <p style="margin-bottom: 20px;">Everything below the <span class="badge badge-shared">ENCRYPTED</span> divider is encrypted with handshake traffic keys.</p>
+
+  <div class="flow" style="background: var(--card); border-radius: 12px; padding: 24px; border: 1px solid var(--border);">
+    <div class="timeline-line tl-client"></div>
+    <div class="timeline-line tl-server"></div>
+
+    <!-- Header -->
+    <div class="flow-header">
+      <div class="col-client">👤 Client</div>
+      <div class="col-mid">Network</div>
+      <div class="col-server">🖥️ Server</div>
+    </div>
+
+    <!-- TCP Handshake -->
+    <div class="flow-divider"><span>TCP 3-Way Handshake (SYN → SYN-ACK → ACK)</span></div>
+
+    <!-- ClientHello -->
+    <div class="flow-row">
+      <div class="col col-left">
+        <span class="badge badge-client">ClientHello</span><br>
+        <span style="font-size:12px; color:var(--muted);">
+          • Protocol version (0x0303 + supported_versions ext)<br>
+          • 32-byte client_random<br>
+          • Cipher suite list<br>
+          • <strong>key_share</strong>: client ECDHE public key(s)<br>
+          • <strong>supported_groups</strong>: x25519, secp256r1…<br>
+          • <strong>signature_algorithms</strong>: ecdsa, rsa_pss…<br>
+          • <strong>server_name (SNI)</strong>: hostname<br>
+          • <strong>psk_key_exchange_modes</strong> (optional)
+        </span>
+      </div>
+      <div class="arrow-container">
+        <div class="arrow-right"><span class="arrow-label">Plaintext</span></div>
+      </div>
+      <div class="col col-right"></div>
+    </div>
+
+    <!-- ServerHello -->
+    <div class="flow-row">
+      <div class="col col-left"></div>
+      <div class="arrow-container">
+        <div class="arrow-left"><span class="arrow-label">Plaintext</span></div>
+      </div>
+      <div class="col col-right">
+        <span class="badge badge-server">ServerHello</span><br>
+        <span style="font-size:12px; color:var(--muted);">
+          • Selected cipher suite<br>
+          • 32-byte server_random<br>
+          • <strong>key_share</strong>: server ECDHE public key<br>
+          • <strong>supported_versions</strong>: TLS 1.3
+        </span>
+      </div>
+    </div>
+
+    <!-- ENCRYPTION BOUNDARY -->
+    <div class="flow-divider" style="border-color: var(--shared); border-width: 2px;">
+      <span style="background: var(--card);">🔐 ENCRYPTED with handshake keys from here</span>
+    </div>
+
+    <!-- EncryptedExtensions -->
+    <div class="flow-row">
+      <div class="col col-left"></div>
+      <div class="arrow-container">
+        <div class="arrow-left"><span class="arrow-label">Encrypted</span></div>
+      </div>
+      <div class="col col-right">
+        <span class="badge badge-server">EncryptedExtensions</span><br>
+        <span style="font-size:12px; color:var(--muted);">
+          • ALPN (h2, http/1.1)<br>
+          • max_fragment_length<br>
+          • server_name acknowledged
+        </span>
+      </div>
+    </div>
+
+    <!-- Certificate -->
+    <div class="flow-row">
+      <div class="col col-left"></div>
+      <div class="arrow-container">
+        <div class="arrow-left"><span class="arrow-label">Encrypted</span></div>
+      </div>
+      <div class="col col-right">
+        <span class="badge badge-server">Certificate</span><br>
+        <span style="font-size:12px; color:var(--muted);">
+          • Server's leaf certificate<br>
+          • Intermediate CA cert(s)<br>
+          • Optional OCSP stapling
+        </span>
+      </div>
+    </div>
+
+    <!-- CertificateVerify -->
+    <div class="flow-row">
+      <div class="col col-left"></div>
+      <div class="arrow-container">
+        <div class="arrow-left"><span class="arrow-label">Encrypted</span></div>
+      </div>
+      <div class="col col-right">
+        <span class="badge badge-server">CertificateVerify</span><br>
+        <span style="font-size:12px; color:var(--muted);">
+          • Digital signature over handshake transcript hash<br>
+          • Proves server owns certificate's private key<br>
+          • Uses negotiated signature algorithm
+        </span>
+      </div>
+    </div>
+
+    <!-- Server Finished -->
+    <div class="flow-row">
+      <div class="col col-left"></div>
+      <div class="arrow-container">
+        <div class="arrow-left"><span class="arrow-label">Encrypted</span></div>
+      </div>
+      <div class="col col-right">
+        <span class="badge badge-server">Finished</span><br>
+        <span style="font-size:12px; color:var(--muted);">
+          • HMAC over entire handshake transcript<br>
+          • Confirms key derivation integrity
+        </span>
+      </div>
+    </div>
+
+    <div class="flow-divider"><span style="background: var(--card);">Client verifies server's Certificate chain + CertificateVerify + Finished</span></div>
+
+    <!-- Client ChangeCipherSpec (compatibility) -->
+    <div class="flow-row">
+      <div class="col col-left">
+        <span class="badge badge-client" style="opacity:.6">[ChangeCipherSpec]</span><br>
+        <span style="font-size:11px; color:var(--muted);">Middlebox compatibility only — not part of TLS 1.3</span>
+      </div>
+      <div class="arrow-container">
+        <div class="arrow-right"><span class="arrow-label">Compat</span></div>
+      </div>
+      <div class="col col-right"></div>
+    </div>
+
+    <!-- Client Finished -->
+    <div class="flow-row">
+      <div class="col col-left">
+        <span class="badge badge-client">Finished</span><br>
+        <span style="font-size:12px; color:var(--muted);">
+          • HMAC over entire transcript<br>
+          • Confirms client derived same keys
+        </span>
+      </div>
+      <div class="arrow-container">
+        <div class="arrow-right"><span class="arrow-label">Encrypted</span></div>
+      </div>
+      <div class="col col-right"></div>
+    </div>
+
+    <!-- APPLICATION DATA -->
+    <div class="flow-divider" style="border-color: var(--server); border-width: 2px;">
+      <span style="background: var(--card);">🔒 ENCRYPTED with application traffic keys</span>
+    </div>
+
+    <div class="flow-row">
+      <div class="col col-left">
+        <span class="badge badge-shared">Application Data</span><br>
+        <span style="font-size:12px;">HTTP/2 requests, API calls…</span>
+      </div>
+      <div class="arrow-container">
+        <div class="arrow-right"><span class="arrow-label">App Data</span></div>
+      </div>
+      <div class="col col-right"></div>
+    </div>
+
+    <div class="flow-row">
+      <div class="col col-left"></div>
+      <div class="arrow-container">
+        <div class="arrow-left"><span class="arrow-label">App Data</span></div>
+      </div>
+      <div class="col col-right">
+        <span class="badge badge-shared">Application Data</span><br>
+        <span style="font-size:12px;">HTTP responses, content…</span>
+      </div>
+    </div>
+
+    <!-- NewSessionTicket -->
+    <div class="flow-row">
+      <div class="col col-left"></div>
+      <div class="arrow-container">
+        <div class="arrow-left"><span class="arrow-label">Post-handshake</span></div>
+      </div>
+      <div class="col col-right">
+        <span class="badge badge-server">NewSessionTicket</span><br>
+        <span style="font-size:12px; color:var(--muted);">
+          • PSK for future 0-RTT resumption<br>
+          • Ticket lifetime & age
+        </span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 7. 0-RTT RESUMPTION -->
+<section id="0rtt">
+  <h2>0-RTT Session Resumption</h2>
+
+  <div class="card-grid">
+    <div class="card">
+      <h3>How 0-RTT Works</h3>
+      <ol style="padding-left:18px; font-size:14px;">
+        <li>After a previous handshake, the server sent a <strong>NewSessionTicket</strong> containing a PSK (Pre-Shared Key).</li>
+        <li>On reconnection, the client includes the PSK in <code>ClientHello</code> along with <strong>early data</strong> (encrypted with keys derived from PSK).</li>
+        <li>Server decrypts early data immediately — <strong>no round-trip wait</strong>.</li>
+        <li>Handshake continues as normal (1-RTT) to establish fresh keys for the rest of the session.</li>
+      </ol>
+    </div>
+    <div class="card">
+      <h3>⚠️ 0-RTT Security Considerations</h3>
+      <ul style="font-size:14px;">
+        <li><strong>No forward secrecy</strong> for 0-RTT data (derived from PSK, not fresh ECDHE).</li>
+        <li><strong>Replay attacks possible</strong>: an attacker can capture and resend 0-RTT data. Servers must implement replay protection.</li>
+        <li>Only safe for <strong>idempotent</strong> requests (e.g., GET). Never for state-changing operations (POST, payment).</li>
+        <li>Server can reject 0-RTT by not decrypting early data → falls back to normal 1-RTT.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="flow" style="background: var(--card); border-radius: 12px; padding: 24px; border: 1px solid var(--border);">
+    <div class="flow-header">
+      <div class="col-client">👤 Client</div>
+      <div class="col-mid">Network</div>
+      <div class="col-server">🖥️ Server</div>
+    </div>
+    <div class="flow-row">
+      <div class="col col-left">
+        <span class="badge badge-client">ClientHello + PSK + Early Data</span><br>
+        <span style="font-size:12px; color:var(--muted);">Application data sent <em>immediately</em> with first flight</span>
+      </div>
+      <div class="arrow-container">
+        <div class="arrow-right"><span class="arrow-label">0-RTT Early Data</span></div>
+      </div>
+      <div class="col col-right"></div>
+    </div>
+    <div class="flow-row">
+      <div class="col col-left"></div>
+      <div class="arrow-container">
+        <div class="arrow-left"><span class="arrow-label">ServerHello + Finished</span></div>
+      </div>
+      <div class="col col-right">
+        <span class="badge badge-server">ServerHello + Finished</span><br>
+        <span style="font-size:12px; color:var(--muted);">Server processes early data & completes handshake</span>
+      </div>
+    </div>
+    <div class="flow-row">
+      <div class="col col-left">
+        <span class="badge badge-client">Finished</span>
+      </div>
+      <div class="arrow-container">
+        <div class="arrow-right"><span class="arrow-label">Encrypted</span></div>
+      </div>
+      <div class="col col-right"></div>
+    </div>
+    <div class="flow-divider"><span style="background: var(--card);">🔒 Full application traffic keys now active</span></div>
+  </div>
+</section>
+
+<!-- 8. APPLICATION DATA -->
+<section id="app-data">
+  <h2>Application Data Encryption</h2>
+
+  <div class="card">
+    <h3>How Data Is Encrypted After Handshake</h3>
+    <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 12px;">
+      <div>
+        <h4 style="color:var(--client); font-size:14px;">Record Layer Structure</h4>
+        <pre style="background:#0d1117; padding:12px; border-radius:8px; font-size:12px; color:#7dd3fc;">
+┌─────────────────────────────────┐
+│  ContentType (1 byte)           │  = 0x17 (Application Data)
+│  Legacy Version (2 bytes)       │  = 0x0303
+│  Length (2 bytes)                │
+├─────────────────────────────────┤
+│                                 │
+│  Encrypted Payload              │
+│  ┌───────────────────────────┐  │
+│  │ Actual content type       │  │
+│  │ Plaintext data            │  │
+│  │ Padding (optional)        │  │
+│  └───────────────────────────┘  │
+│                                 │
+│  Authentication Tag (16 bytes)  │
+└─────────────────────────────────┘</pre>
+      </div>
+      <div>
+        <h4 style="color:var(--server); font-size:14px;">AEAD Encryption Process</h4>
+        <ul style="font-size:13px;">
+          <li><strong>Key</strong>: derived from traffic secret via HKDF-Expand-Label</li>
+          <li><strong>IV</strong>: derived similarly, XORed with record sequence number</li>
+          <li><strong>AAD</strong>: record header (content type + version + length)</li>
+          <li><strong>Plaintext</strong>: actual content + real content type + padding</li>
+          <li><strong>Output</strong>: ciphertext + 16-byte authentication tag</li>
+        </ul>
+        <br>
+        <h4 style="color:var(--shared); font-size:14px;">Key Update</h4>
+        <p style="font-size:13px;">Either side can send a <code>KeyUpdate</code> message to rotate traffic keys without a new handshake. New keys are derived from the current traffic secret using HKDF-Expand-Label.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top: 16px;">
+    <h3>End-to-End Security Summary</h3>
+    <table>
+      <thead><tr><th>Property</th><th>Mechanism</th><th>Protects Against</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Confidentiality</strong></td><td>AEAD encryption (AES-GCM / ChaCha20-Poly1305)</td><td>Eavesdropping</td></tr>
+        <tr><td><strong>Integrity</strong></td><td>AEAD authentication tag + Finished HMAC</td><td>Tampering / modification</td></tr>
+        <tr><td><strong>Authentication</strong></td><td>Certificate chain + CertificateVerify signature</td><td>Impersonation / MITM</td></tr>
+        <tr><td><strong>Forward Secrecy</strong></td><td>Ephemeral ECDHE (new keys every session)</td><td>Future key compromise</td></tr>
+        <tr><td><strong>Replay Protection</strong></td><td>Random nonces + sequence numbers (+ server-side for 0-RTT)</td><td>Replay attacks</td></tr>
+        <tr><td><strong>Downgrade Protection</strong></td><td>Transcript hash in Finished + special server_random values</td><td>Protocol downgrade</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<footer style="text-align:center; padding: 40px 24px; color: var(--muted); font-size: 13px; border-top: 1px solid var(--border); margin-top: 40px;">
+  Reference: <a href="https://datatracker.ietf.org/doc/html/rfc8446" style="color:var(--client);">RFC 8446 — The Transport Layer Security (TLS) Protocol Version 1.3</a>
+</footer>
+
+<script>
+// Scroll-based animation trigger
+const observer = new IntersectionObserver((entries) => {
+  entries.forEach(e => { if (e.isIntersecting) { e.target.style.animationDelay = '0.1s'; e.target.classList.add('animate'); } });
+}, { threshold: 0.1 });
+document.querySelectorAll('.card, .flow-row').forEach(el => observer.observe(el));
+
+// Active nav link
+const sections = document.querySelectorAll('section[id]');
+const navLinks = document.querySelectorAll('nav a');
+window.addEventListener('scroll', () => {
+  let current = '';
+  sections.forEach(s => { if (window.scrollY >= s.offsetTop - 100) current = s.id; });
+  navLinks.forEach(a => { a.classList.toggle('active', a.getAttribute('href') === '#' + current); });
+});
+</script>
+</body>
+</html>
